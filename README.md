@@ -1,6 +1,6 @@
 # Transformer-based Chatbot
 
-# 2025_06_02 Update (Tokenizer Module)
+# 2025_06_01 Update (Tokenizer Module)
 This repository contains a basic implementation of a tokenizer module designed for a Transformer-based chatbot. The code is written in Python using PyTorch.
 
 ## Overview
