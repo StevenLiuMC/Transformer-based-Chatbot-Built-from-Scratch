@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, Dataloader
 import numpy as np
 import json
 import re
@@ -67,67 +67,314 @@ class SimpleTokenizer:
         self.vocab_size += 1
     print(f"Vocabulary size: {self.vocab_size}")
 
-    def _tokenize(self, text):
-      """
-      Tokenize text based on level (in this case we use word-level).
-      """
-      text = text.lower().strip()
-      if self.level == "word":
-        # Simple word tokenization - you can improve this with better regex
-        # Match one or more letters/numbers/underscores (words) or matches a non-alphanumeric and non-whitespace character (punctuation)
-        tokens = re.findall(r'\w+|[^\w\s]',text) # \w+ 匹配一个或多个字母/数字/下划线（单词），| 表示"或"，[^\w\s] 匹配非字母数字且非空白的字符（标点符号）
-      else: # Char level
-        tokens = list(text)
-      return tokens
+  def _tokenize(self, text):
+    """
+    Tokenize text based on level (in this case we use word-level).
+    """
+    text = text.lower().strip()
+    if self.level == "word":
+      # Simple word tokenization - you can improve this with better regex
+      # Match one or more letters/numbers/underscores (words) or matches a non-alphanumeric and non-whitespace character (punctuation)
+      tokens = re.findall(r'\w+|[^\w\s]',text) # \w+ 匹配一个或多个字母/数字/下划线（单词），| 表示"或"，[^\w\s] 匹配非字母数字且非空白的字符（标点符号）
+    else: # Char level
+      tokens = list(text)
+    return tokens
 
-    def encode(self, text, max_length = None):
-      """
-      Convert text to token indices.
-      Args:
-        text: Input text string to encode.
-        max_length: Maximum sequence length (pad or truncate to this length).
-      Returns:
-        List of token indices.
-      """
-      tokens = self._tokenize(text)
-      indices = [self.word2idx.get(token, self.word2idx['<UNK>']) for token in tokens]
+  def encode(self, text, max_length = None):
+    """
+    Convert text to token indices.
+    Args:
+      text: Input text string to encode.
+      max_length: Maximum sequence length (pad or truncate to this length).
+    Returns:
+      List of token indices.
+    """
+    tokens = self._tokenize(text)
+    indices = [self.word2idx.get(token, self.word2idx['<UNK>']) for token in tokens]
 
-      if max_length:
-        # Truncate and remain one spot for EOS
-        if len(indices) >= max_length - 1:
-          indices = indices[:max_length-1]
+    if max_length:
+      # Truncate and remain one spot for EOS
+      if len(indices) >= max_length - 1:
+        indices = indices[:max_length-1]
 
-        # If sequence is not long enough, add EOS first to tell the model that the useful information has ended and then add PAD to make the indices dimension unified.
+      # If sequence is not long enough, add EOS first to tell the model that the useful information has ended and then add PAD to make the indices dimension unified.
+      indices.append(self.word2idx['<EOS>'])
+
+      if len(indices) < max_length:
+        indices += [self.word2idx['<PAD>']] * (max_length - len(indices))
+      else:
+      # If there's no limitation on length, simply add EOS
         indices.append(self.word2idx['<EOS>'])
 
-        if len(indices) < max_length:
-          indices += [self.word2idx['<PAD>']] * (max_length - len(indices))
-        else:
-        # If there's no limitation on length, simply add EOS
-          indices.append(self.word2idx['<EOS>'])
+    return indices
 
-      return indices
+  def decode(self, indices):
+    """
+    Convert token indices back to text.
+    Args:
+      indices: List or tensor of token indices.
+    Returns:
+      Decoded text string.
+    """
+    if torch.is_tensor(indices):
+      indices = indices.cpu().numpy()
 
-    def decode(self, indices):
+    tokens = []
+    for idx in indices:
+      if idx == self.word2idx['<EOS>']:
+        break
+      if idx != self.word2idx['<PAD>'] and idx != self.word2idx['<SOS>']:
+        tokens.append(self.idx2word.get(idx, '<UNK>'))
+
+    if self.level == "word":
+      return ' '.join(tokens)
+    else:
+      return ''.join(tokens)
+
+# ============== Positional Encoding ==============
+
+class PositionalEncoding(nn.Module):
+  """
+  Add positional encoding to embeddings to give the model information about the position of tokens in the sequence.
+  Uses sine and cosine functions of different frequencies to encode the position.
+  """
+  def __init__(self, d_model, max_seq_length = 512, dropout_rate = 0.1): # 这里只是进行了至多512个位置的编码，并不代表送入的句子单词数量(seq_len)也是512
+    super().__init__()
+    # During training, randomly zeroes some of the elements of the input tensor with probability :attr:`p`
+    self.dropout = nn.Dropout(dropout_rate)
+
+    # Create positional encoding matrix
+    pe = torch.zeros(max_seq_length, d_model)
+    position = torch.arange(0, max_seq_length, dtype = float).unsqueeze(1)
+
+    # Create divisor term for the sinusoidal pattern， equivalent to 1/10000^(2i/d_model)
+    div_term = torch.exp(torch.arange(0, d_model, 2, dtype = float) * -(math.log(10000.0)/d_model)) # Compute the element-wise exponential of a tensor.
+
+    # Apply sin to even indices
+    pe[:, 0::2] = torch.sin(position * div_term) # start:stop:step, select all rows(which means all words), but only even columns 0, 2, 4...
+    # Apply cos to odd indices
+    pe[:, 1::2] = torch.cos(position * div_term) # Select all rows(which means all words), but only odd columns 1, 3, 5...
+
+    """
+    Add batch dimension and register as buffer (not a parameter), that means it will not be updated during training.
+    self.register_buffer(name: str, tensor: torch.Tensor)
+    After being saved in the buffer, this variable can be only acquired through the name (string) defined in the quotation marks.
+    """
+    pe = pe.unsqueeze(0) # Add a dimension to match the dimension corresponding to batch_size 补充一个维度来匹配batch_size对应的维度
+    self.register_buffer('peMat', pe)
+
+  def forward(self, x):
+    """
+    Args:
+      x: Input tensor with shape (batch_size, seq_length, d_model)
+      pe is created in __init__ and has a fixed size of (1, max_seq_length, d_model). For example, max_seq_length=512, precompute the encoding of all 512 positions
+      According to the actual input sequence length requirement, the corresponding length is truncated from the pre-calculated 512 position codes
+    """
+    # Add positional encoding to input embeddings. 类内不同方法之间访问实例变量必须用self.
+    x = x + self.peMat[:, :x.size(1), :]
+    return self.dropout(x)
+
+# ============== Multi-head Attention ==============
+
+class MultiHeadAttention(nn.Module):
+  """
+  Multi-head attention mechanism - the core of Transformer architecture.
+  Allows the model to focus on different parts of the input sequence simultaneously.
+  """
+  def __init__(self, d_model, num_heads, dropout_rate = 0.1):
+    super().__init__()
+    """
+    Assertions are debugging tools used to check whether a condition is true while a program is running.
+    If the condition is true, the program continues to execute;
+    If the condition is false, the program stops executing and throws an AssertionError exception.
+    """
+    assert d_model % num_heads == 0 # d_model must be divisible by num_heads d_model一定要能被num_heads整除
+
+    self.d_model = d_model
+    self.num_heads = num_heads
+    self.d_k = d_model // num_heads # d_k is the dimension of the keys and queries, also the dimension of each head
+
+    # Linear projections for Q, K, V   Q、K、V的线性投影
+    # Here we initialize the matrix to be square and later we'll create the multi-head rectangle matrix
+    self.w_q = nn.Linear(d_model, d_model)
+    self.w_k = nn.Linear(d_model, d_model)
+    self.w_v = nn.Linear(d_model, d_model)
+
+    """
+    Output projection matrix. After the multi-head attention calculation is completed, the results of all heads are concatenated,
+    and w_o projects the concatenated results back to the d_model dimension.
+    """
+    self.w_o = nn.Linear(d_model, d_model)
+    self.dropout = nn.Dropout(dropout_rate)
+
+  def forward(self, query, key, value, mask = None):
+    """
+    Args:
+      query: Query tensor with shape (batch_size, seq_length_q, d_model)
+      key: Key tensor with shape (batch_size, seq_length_k, d_model)
+      value: Value tensor with shape (batch_size, seq_length_v, d_model
+      mask: Optional mask tensor
+      *** For self-attention (including encoder self-attention module and decoder masked self-attention module), the query, key, and value tensors are all the same.
+          That means that their squences' lengths are the same -> seq_length_q = seq_length_k = seq_length_v
+      *** For encoder-decoder attention (cross-attention module), the query tensor is the output of the decoder, and the key and value tensors are the output of the encoder.
+          That means that their sequences' lengths are different -> seq_len_q = decoder序列长度 seq_len_k = seq_len_v = encoder序列长度
+    Returns:
+      Output tensor with shape (batch_size, seq_length, d_model)
+      attention_weights: Attention weights for visualization
+    """
+    batch_size = query.size(0)
+    seq_len_q = query.size(1)
+    seq_len_k = key.size(1)
+    seq_len_v = value.size(1)
+
+    # 1.Project and split the d_model-dimensional vector into n_heads d_k-dimensional vectors
+    Q = self.w_q(query).view(batch_size, seq_len_q, self.num_heads, self.d_k).transpose(1,2)
+    K = self.w_k(key).view(batch_size, seq_len_k, self.num_heads, self.d_k).transpose(1,2)
+    V = self.w_v(value).view(batch_size, seq_len_v, self.num_heads, self.d_k).transpose(1,2)
+
+    # 2.Calculate attention scores
+    """
+    Here Q's shape is (batch_size, num_heads, seq_len_q, d_k), while K's shape is also (batch_size, num_heads, seq_len_k, d_k).
+    After transpose of K, K's shape is (batch_size, num_heads, d_k, seq_len_k).
+    For this 4-dimension multiplication, we can simply regard it as doing the multiplication of (seq_len_q, d_k)*(d_k, seq_len_k) for batch_size * num_heads times simultaneously.
+    After this multiplication, the shape of scores is (batch_size, num_heads, seq_len_q, seq_len_k).
+    """
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+
+    # 3.Apply mask if provided(for padding and future positions)
+    if mask is not None:
+      mask = mask.unsqueeze(1).unsqueeze(1) # Add head and query dimensions
+      scores.masked_fill_(mask == 0, -1e9)
       """
-      Convert token indices back to text.
-      Args:
-        indices: List or tensor of token indices.
-      Returns:
-        Decoded text string.
+      # If we have mask（True means we need to keep the original value）
+      mask = torch.tensor([[True, True, False],
+                  [True, False, False]])
+
+      # Fill the position with the value we set (-1e9) where mask is False
+      scores.masked_fill_(mask == False, -1e9)
+      # Results: [[1.0, 2.0, -1e9],
+      #       [4.0, -1e9, -1e9]]
+
+      masked_fill_ 和 masked_fill 的主要区别在于前者是原地（in-place）操作，而后者是返回一个新张量（out-of-place）的操作。
+      在 PyTorch 这类深度学习框架中，通常以后缀下划线 _ 来表示一个函数会直接修改调用它的张量（Tensor）本身，而不是返回一个修改后的副本。
+
+      tensor.masked_fill_(mask, value)
+        当你使用 tensor.masked_fill_(mask, value) 时，tensor 的内容会根据 mask 直接被修改。
+        其中 mask 中为 True 的位置，tensor 中对应位置的元素会被替换为 value。这个操作不返回任何新的张量，而是直接改变 tensor。
+
+      new_tensor = tensor.masked_fill(mask, value)
+        当你使用 new_tensor = tensor.masked_fill(mask, value) 时，原始的 tensor 不会发生任何变化。
+        这个操作会返回一个新的张量 new_tensor，这个新张量是 tensor 的一个副本，并在 mask 为 True 的位置填充了 value
+
       """
-      if torch.is_tensor(indices):
-        indices = indices.cpu().numpy()
 
-      tokens = []
-      for idx in indices:
-        if idx == self.word2idx['<EOS>']:
-          break
-        if idx != self.word2idx['<PAD>'] and idx != self.word2idx['<SOS>']:
-          tokens.append(self.idx2word.get(idx, '<UNK>'))
+    # 4.Apply softmax
+    attention_weights = F.softmax(scores, dim=-1) # attention weights shape is (batch_size, num_heads, seq_len_q, seq_len_k)
+    attention_weights = self.dropout(attention_weights)
 
-      if self.level == "word":
-        return ' '.join(tokens)
-      else:
-        return ''.join(tokens)
+    # 5.Apply attention to values
+    """
+    No matter self-attention module or cross-attention module, seq_len_k = seq_len_v.
+    attention_weights's shape: (batch_size, num_heads, seq_len_q, seq_len_k)
+    V's shape: (batch_size, num_heads, seq_len_v, d_k)
+    After multiplication, the shape of context is (batch_size, num_heads, seq_len_q, d_k)
+    """
+    context = torch.matmul(attention_weights, V)
 
+    # 6.Concatenate heads and put through final linear layer.
+    """
+    (batch_size, num_heads, seq_len_q, d_k) -> (batch_size, seq_len_q, num_heads, d_k) -> (batch_size, seq_len_q, d_model)
+    """
+    context = context.transpose(1,2).contiguous().view(batch_size, seq_len_q, self.d_model)
+    output = self.w_o(context) # Equal to context @ w_o + b. We need this simple FFN to make the previous multi-head matrices fully merge with each other.
+
+    return output, attention_weights
+
+# ============== Feed Forward Network ==============
+
+class FeedForward(nn.Module):
+  """
+  Position-wise feed-forward network. After the multi-head attention calculation is completed,
+    the results of all heads are concatenated and return output tensor with the shape of (batch_size, seq_len_q, d_model).
+  This network will receive the output tensor and process each token (in this case word) independently.
+    If the batch_size = 2, sequence_length = 3, we will use this FFN 2*3=6 times.
+  In Attention is All You Need, d_model = 512, d_ff = 2048. But in this case we will define them later.
+
+  Consists of two linear transformations with a ReLU activation in between.
+  """
+  def __init__(self, d_model, d_ff, dropout_rate = 0.1):
+    super().__init__()
+    self.linear1 = nn.Linear(d_model, d_ff)
+    self.linear2 = nn.Linear(d_ff, d_model)
+    self.dropout = nn.Dropout(dropout_rate)
+    self.relu = nn.ReLU()
+
+  def forward(self, x):
+    """
+    Args:
+      x: Input tensor with shape (batch_size, seq_length, d_model)
+    Returns:
+      Output tensor with shape (batch_size, seq_length, d_model
+    """
+    x = self.linear1(x)
+    x = self.relu(x)
+    x = self.dropout(x)
+    x = self.linear2(x)
+    return x
+
+# ============== Encoder Layer ==============
+
+class EncoderLayer(nn.Module):
+  """
+  Single encoder layer consists of:
+    1. Multi-head self-attention
+    2. Position-wise feed-forward network
+    Both with residual connections and layer normalization.
+  """
+  def __init__(self, d_model, num_heads, d_ff, dropout_rate = 0.1):
+    super().__init__()
+    # 这里创建了一个MultiHeadAttention的实例，并赋值给self.self_attention
+    self.self_attention = MultiHeadAttention(d_model, num_heads, dropout_rate)
+    # 这里创建了一个FeedForward的实例，并赋值给self.feed_forward
+    self.feed_forward = FeedForward(d_model, d_ff, dropout_rate)
+    """
+    虽然norm1和norm2看起来都是用相同的方式创建的nn.LayerNorm(d_model)，但它们实际上是两个完全独立的LayerNorm层，各自有自己的参数。
+    在PyTorch中，每次调用nn.LayerNorm(d_model)都会创建一个新的LayerNorm实例，包含：
+      1. 独立的scale参数（γ）：初始化为1
+      2. 独立的shift参数（β）：初始化为0
+
+      LayerNorm(x) = γ * (x - mean) / sqrt(variance + ε) + β
+
+      norm1用于第一个残差连接（在self-attention之后）
+      norm2用于第二个残差连接（在feed-forward之后）
+
+    这两个normalization层会在训练过程中学习到不同的γ和β参数，以适应各自位置的特定需求。
+    如果我们只用一个LayerNorm实例，那么这两个位置就会被迫共享相同的参数，这会限制模型的表达能力。
+    """
+    self.norm1 = nn.LayerNorm(d_model)
+    self.norm2 = nn.LayerNorm(d_model)
+    self.dropout = nn.Dropout(dropout_rate)
+
+  def forward(self, x, mask = None):
+    """
+    Args:
+      x: Input tensor with shape (batch_size, seq_length, d_model)
+      mask: Optional mask tensor
+    Returns:
+      Output tensor with shape (batch_size, seq_length, d_model)
+    """
+    # Self-attention with residual connection and layer normalization.
+    """
+    这里有一个PyTorch的重要特性：当你对一个nn.Module的实例使用函数调用语法（加括号）时，PyTorch会自动调用它的forward方法。
+    （但也只针对forward方法可以实现自动调用，其他方法还是需要显示调用的）
+    attention_output has the shape of (batch_size, seq_len_q, d_model), while seq_len_q is sequence length of x.
+    The result of attention_output is the result obtained after processing x by the forward method under MultiHeadAttention.这就是自注意力模块对输入张量 x 处理后的输出
+    """
+    attention_output, _ = self.self_attention(x, x, x, mask) # Equivalent to output = self.self_attention.forward(x, x, x, mask)
+    x = self.norm1(x + self.dropout(attention_output))
+
+    # Feed-forward with residual connection and layer normalization.
+    ff_output = self.feed_forward(x)
+    x = self.norm2(x + self.dropout(ff_output))
+
+    return x
