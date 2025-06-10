@@ -147,16 +147,6 @@ class EncoderLayer(nn.Module)
 
 ---
 
-##  How to Use
-
-```python
-x = embedding_layer(input_ids)            # (batch_size, seq_len, d_model)
-x = positional_encoding(x)                # Add positional info
-x = encoder_layer(x, mask=attention_mask) # Apply self-attention + FFN
-```
-
----
-
 ## 📚 References
 
 - Vaswani et al. (2017). *Attention is All You Need*  
