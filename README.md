@@ -58,7 +58,7 @@ This update implements several **core components of the Transformer architecture
 
 ---
 
-##  Modules Overview
+## 🧩 Modules Overview
 
 ###  1. `PositionalEncoding`
 
@@ -147,7 +147,106 @@ class EncoderLayer(nn.Module)
 
 ---
 
+# 2025_06_19 Update (Decoder Layer, Transformer Assembly, Chatbot Generation)
+
+This update completes the full **Transformer architecture**, adding the decoder stack and a chatbot-ready model. Implemented in **PyTorch** with modular design and detailed comments.
+
+---
+
+## 📌 Update Summary
+
+- **Date:** 2025-06-20  
+- **Modules Implemented:**
+  - `DecoderLayer`
+  - `TransformerChatbot`
+  - `generate()` (text generation method within TransformerChatbot)
+
+---
+
+## 🧩 Modules Overview
+
+### 1. `DecoderLayer`
+
+> Implements one decoder block with:
+> - Masked self-attention  
+> - Cross-attention to encoder output  
+> - Feed-forward network  
+> All sub-layers use residual connections + LayerNorm.
+
+```python
+class DecoderLayer(nn.Module)
+```
+
+**Arguments:**
+- `d_model`: Model dimension  
+- `num_heads`: Number of attention heads  
+- `d_ff`: Hidden size in FFN  
+- `dropout_rate`: Dropout rate
+
+**Structure:**
+- Masked Self-Attn → Add & Norm  
+- Cross-Attn → Add & Norm  
+- FeedForward → Add & Norm
+
+---
+
+### 2. `TransformerChatbot`
+
+> Full encoder-decoder architecture for chatbot tasks. Includes:
+> - Embedding + PositionalEncoding  
+> - Stack of encoder/decoder layers  
+> - Output projection to vocabulary  
+> - Masking for padding and look-ahead
+> - Text generation
+
+```python
+class TransformerChatbot(nn.Module)
+```
+
+**Key Methods:**
+- `forward(src, tgt)`: Training-time forward pass  
+- `create_padding_mask()`, `create_look_ahead_mask()`: Masking utilities  
+- `generate(src, tokenizer)`: Inference-time text generation
+
+---
+
+### 3. `generate()`
+
+> Performs auto-regressive decoding using the trained model.
+
+**Steps:**
+1. Encode input with encoder stack  
+2. Initialize target with `<SOS>` token  
+3. Iteratively decode and sample next token  
+4. Stop at `<EOS>` or max length  
+5. Return decoded string
+
+**Sampling:**
+- Softmax + temperature  
+- `torch.multinomial()` for probabilistic token selection
+
+---
+
+## ⚙️ Design Notes
+
+- Post-Norm: `LayerNorm(x + sublayer(x))`  
+- Embedding scaled by `√d_model`  
+- Xavier (Glorot) initialization for weights  
+- `nn.ModuleList` used for stacking layers  
+- Comments included for every key step
+
+---
+
+## ✅ Summary of Capabilities
+
+-  Full Transformer encoder-decoder model  
+-  Attention masking (padding + autoregressive)  
+-  Text generation with sampling  
+-  Training and inference support  
+-  Clean, modular, research-friendly design
+
+
 ## 📚 References
 
 - Vaswani et al. (2017). *Attention is All You Need*  
-- [PyTorch Documentation](https://pytorch.org/docs/stable/index.html)
+- [PyTorch Documentation](https://docs.pytorch.org/docs/stable/index.html)
