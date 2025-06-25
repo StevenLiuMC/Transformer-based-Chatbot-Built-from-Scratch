@@ -13,240 +13,314 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-import json
 import re
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import math
 import random
+from datasets import load_dataset
 
 # Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
+# Set ramdom seed. Ensure reproducibility across Python, NumPy and PyTorch
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
 
 # ============== Tokenizer ==============
 
 class SimpleTokenizer:
-  """
-  A simple character or word-level tokenizer for the chatbot.
-  This tokenizer builds a vocabulary from the training data and converts between text and tokens.
-  For this simple tokenizer we only have two granularities - word or character. Subword level is not supported.
-  """
-  def __init__(self, level = "word"):
     """
-    Args:
-      level: "word" or "char" - determines tokenization granularity 决定分词粒度
+    A simple character or word-level tokenizer for the chatbot.
+    This tokenizer builds a vocabulary from the training data and converts between text and tokens.
+    For this simple tokenizer we only have two granularities - word or character. Subword level is not supported.
     """
-    self.level = level
-    self.word2idx = {'<PAD>':0, '<UNK>':1, '<SOS>':2, '<EOS>':3} # This is a common practice in NLP tasks.
-    self.idx2word = {0:'<PAD>', 1:'<UNK>', 2:'<SOS>', 3:'<EOS>'}
-    self.vocab_size = 4 # Indicates the current vocabulary size, initially there are only 4 special tokens
 
-  def build_vocab(self, texts, max_vocab_size = 10000): # The vocabulary contains at most 10,000 different words.
-    """
-    Build vocabulary from a list of texts.
-    Args:
-      texts: List of text strings to build vocabulary from.
-      max_vocab_size: Maximum vocabulary size to keep.
-    """
-    word_freq = {}
+    def __init__(self, level="word"):
+        """
+        Args:
+          level: "word" or "char" - determines tokenization granularity 决定分词粒度
+        """
+        self.level = level
+        self.word2idx = {
+            "<PAD>": 0,
+            "<UNK>": 1,
+            "<SOS>": 2,
+            "<EOS>": 3,
+            "<USER>": 4,
+            "<BOT>": 5,
+        }  # This is a common practice in NLP tasks.
+        self.idx2word = {
+            0: "<PAD>",
+            1: "<UNK>",
+            2: "<SOS>",
+            3: "<EOS>",
+            4: "<USER>",
+            5: "<BOT>",
+        }  # Here ,<USER> <BOT> can be modified based on the dataset we use
+        self.vocab_size = 6  # Indicates the current vocabulary size, initially there are only 4 special tokens
 
-    for text in texts:
-      tokens = self._tokenize(text)
-      for token in tokens:
-        word_freq[token] = word_freq.get(token, 0) + 1 # dict.get(key, default=None)
+    def _tokenize(self, text):
+        """
+        Tokenize text based on level (in this case we use word-level).
+        """
+        text = text.lower().strip()
+        if self.level == "word":
+            # Simple word tokenization - you can improve this with better regex
+            # Match one or more letters/numbers/underscores (words) or matches a non-alphanumeric and non-whitespace character (punctuation)
+            tokens = re.findall(
+                r"\w+|[^\w\s]", text
+            )  # \w+ 匹配一个或多个字母/数字/下划线（单词），| 表示"或"，[^\w\s] 匹配非字母数字且非空白的字符（标点符号）
+        else:  # Char level
+            tokens = list(text)
+        return tokens
 
-    # Sort by frequency and keep top max_vocab_size
-    sorted_words = sorted(word_freq.items(), key = lambda x: x[1], reverse = True)
-    sorted_words = sorted_words[:max_vocab_size - 4] # Reserve 4 spots for special tokens
+    def build_vocab(
+        self, texts, max_vocab_size=10000
+    ):  # The vocabulary contains at most 10,000 different words.
+        """
+        Build vocabulary from a list of texts.
+        Args:
+          texts: List of text strings to build vocabulary from.
+          max_vocab_size: Maximum vocabulary size to keep.
+        """
+        word_freq = {}
 
-    # Add to vocabulary， insert them into the word2idx dictionary in descending order of word frequency.
-    for word,_ in sorted_words:
-      if word not in self.word2idx:
-        self.word2idx[word] = self.vocab_size
-        self.idx2word[self.vocab_size] = word
-        self.vocab_size += 1
-    print(f"Vocabulary size: {self.vocab_size}")
+        for text in texts:
+            tokens = self._tokenize(text)
+            for token in tokens:
+                word_freq[token] = (
+                    word_freq.get(token, 0) + 1
+                )  # dict.get(key, default=None)
 
-  def _tokenize(self, text):
-    """
-    Tokenize text based on level (in this case we use word-level).
-    """
-    text = text.lower().strip()
-    if self.level == "word":
-      # Simple word tokenization - you can improve this with better regex
-      # Match one or more letters/numbers/underscores (words) or matches a non-alphanumeric and non-whitespace character (punctuation)
-      tokens = re.findall(r'\w+|[^\w\s]',text) # \w+ 匹配一个或多个字母/数字/下划线（单词），| 表示"或"，[^\w\s] 匹配非字母数字且非空白的字符（标点符号）
-    else: # Char level
-      tokens = list(text)
-    return tokens
+        # Sort by frequency and keep top max_vocab_size 按照词频进行降序（descending）排序，词频最高的在最前面
+        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+        sorted_words = sorted_words[
+            : max_vocab_size - 6
+        ]  # Reserve 6 spots for special tokens
 
-  def encode(self, text, max_length = None):
-    """
-    Convert text to token indices.
-    Args:
-      text: Input text string to encode.
-      max_length: Maximum sequence length (pad or truncate to this length).
-    Returns:
-      List of token indices.
-    """
-    tokens = self._tokenize(text)
-    indices = [self.word2idx.get(token, self.word2idx['<UNK>']) for token in tokens]
+        # Add to vocabulary， insert them into the word2idx dictionary in descending order of word frequency.
+        for word, _ in sorted_words:
+            if word not in self.word2idx:
+                self.word2idx[word] = self.vocab_size
+                self.idx2word[self.vocab_size] = word
+                self.vocab_size += 1
+        print(f"Vocabulary size: {self.vocab_size}")
 
-    if max_length:
-      # Truncate and remain one spot for EOS
-      if len(indices) >= max_length - 1:
-        indices = indices[:max_length-1]
+    def encode(
+        self,
+        text: str,
+        max_length: int = None,
+        add_sos: bool = False,
+        add_eos: bool = True,
+    ) -> list[int]:
+        """
+        Convert text to token indices. 将 text 转成 token id 列表，可选地加上 <SOS> 或 <EOS>，并 pad/truncate 到 max_length。
+        Args:
+          text: Input text string to encode.
+          max_length: Maximum sequence length (pad or truncate to this length).
+          add_sos: Whether to add <SOS> token at the beginning of the sequence. 这在我们后面的ChatDataset中会用到能够简化序列处理逻辑
+          add_eos: Whether to add <EOS> token at the end of the sequence.
+        Returns:
+          List of token indices.
+          indices: 长度 ≤ max_length，若指定了 max_length 则恰好 == max_length
+        """
+        tokens = self._tokenize(text)
+        indices = [self.word2idx.get(token, self.word2idx["<UNK>"]) for token in tokens]
 
-      # If sequence is not long enough, add EOS first to tell the model that the useful information has ended and then add PAD to make the indices dimension unified.
-      indices.append(self.word2idx['<EOS>'])
+        # 预留给 SOS/EOS 的位置数
+        reserve = int(add_sos) + int(add_eos)
 
-      if len(indices) < max_length:
-        indices += [self.word2idx['<PAD>']] * (max_length - len(indices))
-      else:
-      # If there's no limitation on length, simply add EOS
-        indices.append(self.word2idx['<EOS>'])
+        # 截断：保证普通 token ≤ max_length - reserve
+        if max_length and len(indices) > max_length - reserve:
+            indices = indices[: max_length - reserve]
 
-    return indices
+        # 插入 SOS
+        if add_sos:
+            indices = [self.word2idx["<SOS>"]] + indices  # Add SOS
 
-  def decode(self, indices):
-    """
-    Convert token indices back to text.
-    Args:
-      indices: List or tensor of token indices.
-    Returns:
-      Decoded text string.
-    """
-    if torch.is_tensor(indices):
-      indices = indices.cpu().numpy()
+        # 插入 EOS
+        if add_eos:
+            indices.append(self.word2idx["<EOS>"])  # Add EOS
 
-    tokens = []
-    for idx in indices:
-      if idx == self.word2idx['<EOS>']:
-        break
-      if idx != self.word2idx['<PAD>'] and idx != self.word2idx['<SOS>']:
-        tokens.append(self.idx2word.get(idx, '<UNK>'))
+        # PAD 到固定长度 Pad to max_length
+        if max_length and len(indices) < max_length:
+            pad_id = self.word2idx["<PAD>"]
+            indices += [pad_id] * (max_length - len(indices))
 
-    if self.level == "word":
-      return ' '.join(tokens)
-    else:
-      return ''.join(tokens)
+        return indices  # Return the index list contains word ID
+
+    def decode(self, indices):
+        """
+        Convert token indices back to text.
+        Args:
+          indices: List or tensor of token indices.
+        Returns:
+          Decoded text string.
+        """
+        if torch.is_tensor(indices):
+            indices = indices.cpu().numpy()
+
+        tokens = []
+        for idx in indices:
+            if idx == self.word2idx["<EOS>"]:
+                break
+            if idx != self.word2idx["<PAD>"] and idx != self.word2idx["<SOS>"]:
+                tokens.append(self.idx2word.get(idx, "<UNK>"))
+
+        if self.level == "word":
+            return " ".join(tokens)
+        else:
+            return "".join(tokens)
 
 # ============== Positional Encoding ==============
 
 class PositionalEncoding(nn.Module):
-  """
-  Add positional encoding to embeddings to give the model information about the position of tokens in the sequence.
-  Uses sine and cosine functions of different frequencies to encode the position.
-  """
-  def __init__(self, d_model, max_seq_length = 512, dropout_rate = 0.1): # 这里只是进行了至多512个位置的编码，并不代表送入的句子单词数量(seq_len)也是512
-    super().__init__()
-    # During training, randomly zeroes some of the elements of the input tensor with probability :attr:`p`
-    self.dropout = nn.Dropout(dropout_rate)
-
-    # Create positional encoding matrix
-    pe = torch.zeros(max_seq_length, d_model)
-    position = torch.arange(0, max_seq_length, dtype = float).unsqueeze(1)
-
-    # Create divisor term for the sinusoidal pattern， equivalent to 1/10000^(2i/d_model)
-    div_term = torch.exp(torch.arange(0, d_model, 2, dtype = float) * -(math.log(10000.0)/d_model)) # Compute the element-wise exponential of a tensor.
-
-    # Apply sin to even indices
-    pe[:, 0::2] = torch.sin(position * div_term) # start:stop:step, select all rows(which means all words), but only even columns 0, 2, 4...
-    # Apply cos to odd indices
-    pe[:, 1::2] = torch.cos(position * div_term) # Select all rows(which means all words), but only odd columns 1, 3, 5...
-
     """
+    Add positional encoding to embeddings to give the model information about the position of tokens in the sequence.
+    Uses sine and cosine functions of different frequencies to encode the position.
+    """
+
+    def __init__(
+        self, d_model, max_seq_length=512, dropout_rate=0.1
+    ):  # 这里只是进行了至多512个位置的编码，并不代表送入的句子单词数量(seq_len)也是512
+        super().__init__()
+        # During training, randomly zeroes some of the elements of the input tensor with probability :attr:`p`
+        self.dropout = nn.Dropout(dropout_rate)
+
+        # Create positional encoding matrix
+        pe = torch.zeros(max_seq_length, d_model)
+        position = torch.arange(0, max_seq_length, dtype=float).unsqueeze(1)
+
+        # Create divisor term for the sinusoidal pattern， equivalent to 1/10000^(2i/d_model)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=float) * -(math.log(10000.0) / d_model)
+        )  # Compute the element-wise exponential of a tensor.
+
+        # Apply sin to even indices
+        pe[:, 0::2] = torch.sin(
+            position * div_term
+        )  # start:stop:step, select all rows(which means all words), but only even columns 0, 2, 4...
+        # Apply cos to odd indices
+        pe[:, 1::2] = torch.cos(
+            position * div_term
+        )  # Select all rows(which means all words), but only odd columns 1, 3, 5...
+
+        """
     Add batch dimension and register as buffer (not a parameter), that means it will not be updated during training.
     self.register_buffer(name: str, tensor: torch.Tensor)
     After being saved in the buffer, this variable can be only acquired through the name (string) defined in the quotation marks.
     """
-    pe = pe.unsqueeze(0) # Add a dimension to match the dimension corresponding to batch_size 补充一个维度来匹配batch_size对应的维度
-    self.register_buffer('peMat', pe)
+        pe = pe.unsqueeze(
+            0
+        )  # Add a dimension to match the dimension corresponding to batch_size 补充一个维度来匹配batch_size对应的维度
+        self.register_buffer("peMat", pe)
 
-  def forward(self, x):
-    """
-    Args:
-      x: Input tensor with shape (batch_size, seq_length, d_model)
-      pe is created in __init__ and has a fixed size of (1, max_seq_length, d_model). For example, max_seq_length=512, precompute the encoding of all 512 positions
-      According to the actual input sequence length requirement, the corresponding length is truncated from the pre-calculated 512 position codes
-    """
-    # Add positional encoding to input embeddings. 类内不同方法之间访问实例变量必须用self.
-    x = x + self.peMat[:, :x.size(1), :]
-    return self.dropout(x)
+    def forward(self, x):
+        """
+        Args:
+          x: Input tensor with shape (batch_size, seq_length, d_model)
+          pe is created in __init__ and has a fixed size of (1, max_seq_length, d_model). For example, max_seq_length=512, precompute the encoding of all 512 positions
+          According to the actual input sequence length requirement, the corresponding length is truncated from the pre-calculated 512 position codes
+        """
+        # Add positional encoding to input embeddings. 类内不同方法之间访问实例变量必须用self.
+        x = x + self.peMat[:, : x.size(1), :]
+        return self.dropout(x)
 
 # ============== Multi-head Attention ==============
 
 class MultiHeadAttention(nn.Module):
-  """
-  Multi-head attention mechanism - the core of Transformer architecture.
-  Allows the model to focus on different parts of the input sequence simultaneously.
-  """
-  def __init__(self, d_model, num_heads, dropout_rate = 0.1):
-    super().__init__()
     """
+    Multi-head attention mechanism - the core of Transformer architecture.
+    Allows the model to focus on different parts of the input sequence simultaneously.
+    """
+
+    def __init__(self, d_model, num_heads, dropout_rate=0.1):
+        super().__init__()
+        """
     Assertions are debugging tools used to check whether a condition is true while a program is running.
     If the condition is true, the program continues to execute;
     If the condition is false, the program stops executing and throws an AssertionError exception.
     """
-    assert d_model % num_heads == 0 # d_model must be divisible by num_heads d_model一定要能被num_heads整除
+        assert (
+            d_model % num_heads == 0
+        )  # d_model must be divisible by num_heads d_model一定要能被num_heads整除
 
-    self.d_model = d_model
-    self.num_heads = num_heads
-    self.d_k = d_model // num_heads # d_k is the dimension of the keys and queries, also the dimension of each head
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = (
+            d_model // num_heads
+        )  # d_k is the dimension of the keys and queries, also the dimension of each head
 
-    # Linear projections for Q, K, V   Q、K、V的线性投影
-    # Here we initialize the matrix to be square and later we'll create the multi-head rectangle matrix
-    self.w_q = nn.Linear(d_model, d_model)
-    self.w_k = nn.Linear(d_model, d_model)
-    self.w_v = nn.Linear(d_model, d_model)
+        # Linear projections for Q, K, V   Q、K、V的线性投影
+        # Here we initialize the matrix to be square, and later we'll create the multi-head rectangle matrix
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
 
-    """
+        """
     Output projection matrix. After the multi-head attention calculation is completed, the results of all heads are concatenated,
     and w_o projects the concatenated results back to the d_model dimension.
     """
-    self.w_o = nn.Linear(d_model, d_model)
-    self.dropout = nn.Dropout(dropout_rate)
+        self.w_o = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout_rate)
 
-  def forward(self, query, key, value, mask = None):
-    """
-    Args:
-      query: Query tensor with shape (batch_size, seq_length_q, d_model)
-      key: Key tensor with shape (batch_size, seq_length_k, d_model)
-      value: Value tensor with shape (batch_size, seq_length_v, d_model
-      mask: Optional mask tensor
-      *** For self-attention (including encoder self-attention module and decoder masked self-attention module), the query, key, and value tensors are all the same.
-          That means that their squences' lengths are the same -> seq_length_q = seq_length_k = seq_length_v
-      *** For encoder-decoder attention (cross-attention module), the query tensor is the output of the decoder, and the key and value tensors are the output of the encoder.
-          That means that their sequences' lengths are different -> seq_len_q = decoder序列长度 seq_len_k = seq_len_v = encoder序列长度
-    Returns:
-      Output tensor with shape (batch_size, seq_length, d_model)
-      attention_weights: Attention weights for visualization
-    """
-    batch_size = query.size(0)
-    seq_len_q = query.size(1)
-    seq_len_k = key.size(1)
-    seq_len_v = value.size(1)
+    def forward(self, query, key, value, mask=None):
+        """
+        Args:
+          query: Query tensor with shape (batch_size, seq_length_q, d_model)
+          key: Key tensor with shape (batch_size, seq_length_k, d_model)
+          value: Value tensor with shape (batch_size, seq_length_v, d_model)
+          mask: Optional mask tensor
+          *** For self-attention (including encoder self-attention module and decoder masked self-attention module), the query, key, and value tensors are all the same.
+              That means that their squences' lengths are the same -> seq_length_q = seq_length_k = seq_length_v
+          *** For encoder-decoder attention (cross-attention module), the query tensor is the output of the decoder, and the key and value tensors are the output of the encoder.
+              That means that their sequences' lengths are different -> seq_len_q = decoder序列长度 seq_len_k = seq_len_v = encoder序列长度
+        Returns:
+          Output tensor with shape (batch_size, seq_length, d_model)
+          attention_weights: Attention weights for visualization
+        """
+        batch_size = query.size(0)
+        seq_len_q = query.size(1)
+        seq_len_k = key.size(1)
+        seq_len_v = value.size(1)
 
-    # 1.Project and split the d_model-dimensional vector into n_heads d_k-dimensional vectors
-    Q = self.w_q(query).view(batch_size, seq_len_q, self.num_heads, self.d_k).transpose(1,2)
-    K = self.w_k(key).view(batch_size, seq_len_k, self.num_heads, self.d_k).transpose(1,2)
-    V = self.w_v(value).view(batch_size, seq_len_v, self.num_heads, self.d_k).transpose(1,2)
+        # 1.Project and split the d_model-dimensional vector into n_heads d_k-dimensional vectors
+        Q = (
+            self.w_q(query)
+            .view(batch_size, seq_len_q, self.num_heads, self.d_k)
+            .transpose(1, 2)
+        )
+        K = (
+            self.w_k(key)
+            .view(batch_size, seq_len_k, self.num_heads, self.d_k)
+            .transpose(1, 2)
+        )
+        V = (
+            self.w_v(value)
+            .view(batch_size, seq_len_v, self.num_heads, self.d_k)
+            .transpose(1, 2)
+        )
 
-    # 2.Calculate attention scores
-    """
-    Here Q's shape is (batch_size, num_heads, seq_len_q, d_k), while K's shape is also (batch_size, num_heads, seq_len_k, d_k).
+        # 2.Calculate attention scores
+        """
+    Here Q's shape is (batch_size, num_heads, seq_len_q, d_k), while K's shape is (batch_size, num_heads, seq_len_k, d_k).
     After transpose of K, K's shape is (batch_size, num_heads, d_k, seq_len_k).
     For this 4-dimension multiplication, we can simply regard it as doing the multiplication of (seq_len_q, d_k)*(d_k, seq_len_k) for batch_size * num_heads times simultaneously.
     After this multiplication, the shape of scores is (batch_size, num_heads, seq_len_q, seq_len_k).
     """
-    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
-    # 3.Apply mask if provided(for padding and future positions)
-    if mask is not None:
-      mask = mask.unsqueeze(1).unsqueeze(1) # Add head and query dimensions
-      scores.masked_fill_(mask == 0, -1e9)
-      """
-      # If we have mask（True means we need to keep the original value）
+        # 3.Apply mask if provided(for padding and future positions)
+        if mask is not None:
+            mask = mask.unsqueeze(1).unsqueeze(1)  # Add head and query dimensions
+            scores.masked_fill_(mask == 0, -1e9)
+            """
+      # If we have mask（True means we need to keep the original value）. Here is just a example of showing how mask works. Don't reflect the mechanism of masked self-attention.
       mask = torch.tensor([[True, True, False],
                   [True, False, False]])
 
@@ -268,76 +342,87 @@ class MultiHeadAttention(nn.Module):
 
       """
 
-    # 4.Apply softmax
-    attention_weights = F.softmax(scores, dim=-1) # attention weights shape is (batch_size, num_heads, seq_len_q, seq_len_k)
-    attention_weights = self.dropout(attention_weights)
+        # 4.Apply softmax
+        attention_weights = F.softmax(
+            scores, dim=-1
+        )  # attention weights shape is (batch_size, num_heads, seq_len_q, seq_len_k)
+        attention_weights = self.dropout(attention_weights)
 
-    # 5.Apply attention to values
-    """
+        # 5.Apply attention to values
+        """
     No matter self-attention module or cross-attention module, seq_len_k = seq_len_v.
     attention_weights's shape: (batch_size, num_heads, seq_len_q, seq_len_k)
     V's shape: (batch_size, num_heads, seq_len_v, d_k)
     After multiplication, the shape of context is (batch_size, num_heads, seq_len_q, d_k)
     """
-    context = torch.matmul(attention_weights, V)
+        context = torch.matmul(attention_weights, V)
 
-    # 6.Concatenate heads and put through final linear layer.
+        # 6.Concatenate heads and put through final linear layer.
+        """
+    Output has shape: (batch_size, num_heads, seq_len_q, d_k) -> (batch_size, seq_len_q, num_heads, d_k) -> (batch_size, seq_len_q, d_model)
     """
-    (batch_size, num_heads, seq_len_q, d_k) -> (batch_size, seq_len_q, num_heads, d_k) -> (batch_size, seq_len_q, d_model)
-    """
-    context = context.transpose(1,2).contiguous().view(batch_size, seq_len_q, self.d_model)
-    output = self.w_o(context) # Equal to context @ w_o + b. We need this simple FFN to make the previous multi-head matrices fully merge with each other.
+        context = (
+            context.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, seq_len_q, self.d_model)
+        )
+        output = self.w_o(
+            context
+        )  # Equal to context @ w_o + b. We need this simple FFN to make the previous multi-head matrices fully merge with each other.
 
-    return output, attention_weights
+        return output, attention_weights
 
 # ============== Feed Forward Network ==============
 
 class FeedForward(nn.Module):
-  """
-  Position-wise feed-forward network. After the multi-head attention calculation is completed,
-    the results of all heads are concatenated and return output tensor with the shape of (batch_size, seq_len_q, d_model).
-  This network will receive the output tensor and process each token (in this case word) independently.
-    If the batch_size = 2, sequence_length = 3, we will use this FFN 2*3=6 times.
-  In Attention is All You Need, d_model = 512, d_ff = 2048. But in this case we will define them later.
-
-  Consists of two linear transformations with a ReLU activation in between.
-  """
-  def __init__(self, d_model, d_ff, dropout_rate = 0.1):
-    super().__init__()
-    self.linear1 = nn.Linear(d_model, d_ff)
-    self.linear2 = nn.Linear(d_ff, d_model)
-    self.dropout = nn.Dropout(dropout_rate)
-    self.relu = nn.ReLU()
-
-  def forward(self, x):
     """
-    Args:
-      x: Input tensor with shape (batch_size, seq_length, d_model)
-    Returns:
-      Output tensor with shape (batch_size, seq_length, d_model
+    Feed-forward network 不会改变矩阵维度，只是在隐藏层升到高维然后输出时又降回输入时的维度
+    Position-wise feed-forward network. After the multi-head attention calculation is completed,
+      the results of all heads are concatenated and return output tensor with the shape of (batch_size, seq_len_q, d_model).
+    This network will receive the output tensor and process each token (in this case word) independently.
+      If the batch_size = 2, sequence_length = 3, we will use this FFN 2*3=6 times.
+    In Attention is All You Need, d_model = 512, d_ff = 2048. But in this case we will define them later.
+
+    Consists of two linear transformations with a ReLU activation in between.
     """
-    x = self.linear1(x)
-    x = self.relu(x)
-    x = self.dropout(x)
-    x = self.linear2(x)
-    return x
+
+    def __init__(self, d_model, d_ff, dropout_rate=0.1):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        """
+        Args:
+          x: Input tensor with shape (batch_size, seq_length, d_model)
+        Returns:
+          Output tensor with shape (batch_size, seq_length, d_model
+        """
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.linear2(x)
+        return x
 
 # ============== Encoder Layer ==============
 
 class EncoderLayer(nn.Module):
-  """
-  Single encoder layer consists of:
-    1. Multi-head self-attention
-    2. Position-wise feed-forward network
-    Both with residual connections and layer normalization.
-  """
-  def __init__(self, d_model, num_heads, d_ff, dropout_rate = 0.1):
-    super().__init__()
-    # 这里创建了一个MultiHeadAttention的实例，并赋值给self.self_attention
-    self.self_attention = MultiHeadAttention(d_model, num_heads, dropout_rate)
-    # 这里创建了一个FeedForward的实例，并赋值给self.feed_forward
-    self.feed_forward = FeedForward(d_model, d_ff, dropout_rate)
     """
+    Single encoder layer consists of:
+      1. Multi-head self-attention
+      2. Position-wise feed-forward network
+      Both with residual connections and layer normalization.
+    """
+
+    def __init__(self, d_model, num_heads, d_ff, dropout_rate=0.1):
+        super().__init__()
+        # 这里创建了一个MultiHeadAttention的实例，并赋值给self.self_attention
+        self.self_attention = MultiHeadAttention(d_model, num_heads, dropout_rate)
+        # 这里创建了一个FeedForward的实例，并赋值给self.feed_forward
+        self.feed_forward = FeedForward(d_model, d_ff, dropout_rate)
+        """
     虽然norm1和norm2看起来都是用相同的方式创建的nn.LayerNorm(d_model)，但它们实际上是两个完全独立的LayerNorm层，各自有自己的参数。
     在PyTorch中，每次调用nn.LayerNorm(d_model)都会创建一个新的LayerNorm实例，包含：
       1. 独立的scale参数（γ）：初始化为1
@@ -351,99 +436,119 @@ class EncoderLayer(nn.Module):
     这两个normalization层会在训练过程中学习到不同的γ和β参数，以适应各自位置的特定需求。
     如果我们只用一个LayerNorm实例，那么这两个位置就会被迫共享相同的参数，这会限制模型的表达能力。
     """
-    self.norm1 = nn.LayerNorm(d_model)
-    self.norm2 = nn.LayerNorm(d_model)
-    self.dropout = nn.Dropout(dropout_rate)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout_rate)
 
-  def forward(self, x, mask = None):
-    """
-    Args:
-      x: Input tensor with shape (batch_size, seq_length, d_model)
-      mask: Optional mask tensor
-    Returns:
-      Output tensor with shape (batch_size, seq_length, d_model)
-    """
-    # Self-attention with residual connection and layer normalization.
-    """
+    def forward(self, x, mask=None):
+        """
+        Args:
+          x: Input tensor with shape (batch_size, seq_length, d_model)
+          mask: Optional mask tensor
+        Returns:
+          Output tensor with shape (batch_size, seq_length, d_model)
+        """
+        # Self-attention with residual connection and layer normalization.
+        """
     这里有一个PyTorch的重要特性：当你对一个nn.Module的实例使用函数调用语法（加括号）时，PyTorch会自动调用它的forward方法。
     （但也只针对forward方法可以实现自动调用，其他方法还是需要显示调用的）
     attention_output has the shape of (batch_size, seq_len_q, d_model), while seq_len_q is sequence length of x.
     The result of attention_output is the result obtained after processing x by the forward method under MultiHeadAttention.这就是自注意力模块对输入张量 x 处理后的输出
     """
-    attention_output, _ = self.self_attention(x, x, x, mask) # Equivalent to output = self.self_attention.forward(x, x, x, mask)
-    x = self.norm1(x + self.dropout(attention_output))
+        attention_output, _ = self.self_attention(
+            x, x, x, mask
+        )  # Equivalent to output = self.self_attention.forward(x, x, x, mask)
+        x = self.norm1(x + self.dropout(attention_output))
 
-    # Feed-forward with residual connection and layer normalization.
-    ff_output = self.feed_forward(x)
-    x = self.norm2(x + self.dropout(ff_output))
+        # Feed-forward with residual connection and layer normalization.
+        ff_output = self.feed_forward(x)
+        x = self.norm2(x + self.dropout(ff_output))
 
-    return x
+        return x
 
 # ============== Decoder Layer ==============
 
 class DecoderLayer(nn.Module):
-  """
-  Single decoder layer consists of:
-    1. Masked multi-head self-attention
-    2. Multi-head encoder-decoder cross-attention (attention to encoder output)
-    3. Position-wise feed-forward network
-    All with residual connections and layer normalization.
-  """
-  def __init__(self, d_model, num_heads, d_ff, dropout_rate = 0.1):
-    super.__init__()
-    self.masked_self_attention = MultiHeadAttention(d_model, num_heads, dropout_rate) # Create in-class
-    self.cross_attention = MultiHeadAttention(d_model, num_heads, dropout_rate)
-    self.feed_forward = FeedForward(d_model, d_ff, dropout_rate)
-    self.norm1 = nn.LayerNorm(d_model)
-    self.norm2 = nn.LayerNorm(d_model)
-    self.norm3 = nn.LayerNorm(d_model)
-    self.dropout = nn.Dropout(dropout_rate)
-
-  def forward(self, x, encoder_output, source_mask = None, target_mask = None):
     """
-    Args:
-      x: Input tensor with shape (batch_size, seq_length, d_model)
-      encoder_output: Output tensor from encoder module with shape (batch_size, seq_length, d_model)
-      source_mask: Source sequence mask tensor
-      target_mask: Target sequence mask tensor (with future positions masked)
-    Returns:
-      Output tensor with shape (batch_size, seq_length, d_model)
+    Single decoder layer consists of:
+      1. Masked multi-head self-attention
+      2. Multi-head encoder-decoder cross-attention (attention to encoder output)
+      3. Position-wise feed-forward network
+      All with residual connections and layer normalization.
     """
-    # Masked self-attention
-    self_attention_output, _ = self.masked_self_attention(x, x, x, target_mask)
-    x = self.norm1(x + self.dropout(self_attention_output)) # Layer Normalization (Residual Connection + Self-attention Output(with softmax on d_model dimension))
 
-    # Cross-attention with encoder output
-    cross_attention_output, _ = self.cross_attention(x, encoder_output, encoder_output, source_mask) # Args: query, key, value, mask
-    x = self.norm2(x + self.dropout(cross_attention_output))
+    def __init__(self, d_model, num_heads, d_ff, dropout_rate=0.1):
+        super().__init__()
+        self.masked_self_attention = MultiHeadAttention(
+            d_model, num_heads, dropout_rate
+        )  # Create in-class
+        self.cross_attention = MultiHeadAttention(d_model, num_heads, dropout_rate)
+        self.feed_forward = FeedForward(d_model, d_ff, dropout_rate)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout_rate)
 
-    # Feed-forward
-    ff_output = self.feed_forward(x)
-    x = self.norm3(x + self.dropout(ff_output))
+    def forward(self, x, encoder_output, source_mask=None, target_mask=None):
+        """
+        Args:
+          x: Input tensor with shape (batch_size, tgt_seq_length, d_model)
+          encoder_output: Output tensor from encoder module with shape (batch_size, src_seq_length, d_model)
+          source_mask: Source sequence mask tensor
+          target_mask: Target sequence mask tensor (with future positions masked)
+        Returns:
+          Output tensor with shape (batch_size, tgt_sequence_length, d_model)
+        """
+        # Masked self-attention
+        self_attention_output, _ = self.masked_self_attention(x, x, x, target_mask)
+        x = self.norm1(
+            x + self.dropout(self_attention_output)
+        )  # Layer Normalization (Residual Connection + Self-attention Output(with softmax on d_model dimension))
 
-    return x
+        # Cross-attention with encoder output
+        # cross_attention_output tensor has shape: (batch_size, tgt_sequence_length, d_model)
+        cross_attention_output, _ = self.cross_attention(
+            x, encoder_output, encoder_output, source_mask
+        )  # Args: query, key, value, mask
+        x = self.norm2(x + self.dropout(cross_attention_output))
+
+        # Feed-forward
+        ff_output = self.feed_forward(x)
+        x = self.norm3(x + self.dropout(ff_output))
+
+        return x
 
 # ============== Transformer Model ==============
 
 class TransformerChatbot(nn.Module):
-  """
-  Assembel all the needed modules to create a transformer chatbot.
-  Consists of:
-    1. Input embeddings and positional encoding
-    2. Stack of encoder layers
-    3. Stack of decoder layers
-    4. Output projection to vocabulary
-  """
-  def __init__(self, vocab_size, d_model=256, num_heads=8, num_layers=4, d_ff=1024, max_seq_length=512, dropout_rate=0.1):
-    super.__init__()
-
-    # Model parameters
-    self.d_model = d_model
-    self.vocab_size = vocab_size
-    self.max_seq_length = max_seq_length
-
-    # Embeddings and positional encoding
     """
+    Assembel all the needed modules to create a transformer chatbot.
+    Consists of:
+      1. Input embeddings and positional encoding
+      2. Stack of encoder layers
+      3. Stack of decoder layers
+      4. Output projection to vocabulary
+    """
+
+    def __init__(
+        self,
+        vocab_size,
+        d_model=256,
+        num_heads=8,
+        num_layers=4,
+        d_ff=1024,
+        max_seq_length=512,
+        dropout_rate=0.1,
+    ):
+        super().__init__()
+
+        # Model parameters
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.max_seq_length = max_seq_length
+
+        # Embeddings and positional encoding
+        """
     By default, PyTorch uses the standard normal distribution N(0,1) to initialize the embedding matrix. This is equivalent to creating a lookup table of vocab_size × d_model.
       Before using nn.Embedding to transfer words in the vocabulary into embeddings, we need to transfer the words in the sequence into IDs.
       Then we proceed ID tensor with shape (batch_size, sequence_length) to nn.Embedding to transfer the ID into d_model-dimensional embeddings. This process is word embedding initialization.
@@ -453,11 +558,13 @@ class TransformerChatbot(nn.Module):
     After this transformation from ID to embeddings, we can have the word embedding matrix with shape (batch_size, sequence_length, d_model).
       This process can be concluded as a chain: Word -> ID -> Embedding. “词 → ID → 向量” 的映射链条就是词嵌入（Word Embedding）的本质
     """
-    self.embedding = nn.Embedding(vocab_size, d_model)
-    self.positional_encoding = PositionalEncoding(d_model, max_seq_length, dropout_rate)
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_encoding = PositionalEncoding(
+            d_model, max_seq_length, dropout_rate
+        )
 
-    # Encoder and Decoder stacks
-    """
+        # Encoder and Decoder stacks
+        """
     nn.ModuleList is a special container in PyTorch that is specifically used to store neural network modules. It returns a ModuleList object and can be used like a normal list.
       ModuleList can be indexed like a regular Python list, but modules it contains are properly registered, and will be visible by all Module methods.
       When you pass the tensor to the encoder layers, it does not automatically iterate over these 4 layers.
@@ -466,167 +573,211 @@ class TransformerChatbot(nn.Module):
         so that PyTorch will automatically track the parameters of these layers during training to ensure that they can be updated by the optimizer.
       If you use List [] to contain those layers, that's legal but all those parameters will not be registered and tracked, which also means that they will not be updated during training.
     """
-    self.encoder_layers = nn.ModuleList([EncoderLayer(d_model, num_heads, d_ff, dropout_rate) for _ in range(num_layers)])
-    # for _ in range(n_layers)中的下划线_确实是一个占位符，表示"我需要循环num_layers次，但不需要使用循环变量"。这个列表推导式会创建num_layers个独立的EncoderLayer实例。
-    self.decoder_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, d_ff, dropout_rate) for _ in range(num_layers)])
+        self.encoder_layers = nn.ModuleList(
+            [
+                EncoderLayer(d_model, num_heads, d_ff, dropout_rate)
+                for _ in range(num_layers)
+            ]
+        )
+        # for _ in range(n_layers)中的下划线_确实是一个占位符，表示"我需要循环num_layers次，但不需要使用循环变量"。这个列表推导式会创建num_layers个独立的EncoderLayer实例。
+        self.decoder_layers = nn.ModuleList(
+            [
+                DecoderLayer(d_model, num_heads, d_ff, dropout_rate)
+                for _ in range(num_layers)
+            ]
+        )
 
-    # Output projection
-    self.output_projection = nn.Linear(d_model, vocab_size)
+        # Output projection
+        self.output_projection = nn.Linear(d_model, vocab_size)
 
-    # Initialize weights
-    self._init_weights()
+        # Initialize weights
+        self._init_weights()
 
-  def _init_weights(self):
-    """
-    Initialize model weights using Xavier initialization.
-    Xavier初始化（也叫Glorot初始化）的数学原理是保持每层输入和输出的方差一致，防止梯度消失或爆炸。公式是从均匀分布U(-a, a)中采样，其中a = sqrt(6/(fan_in + fan_out))
-    nn.init.kaiming_normal_：适合ReLU激活函数
-    nn.init.normal_：标准正态分布
-    nn.init.constant_：常数初始化
-    nn.init.zeros_：全零初始化
-    """
-    for p in self.parameters(): # Returns an iterator over all trainable parameters in the model. This is typically passed to an optimizer.
-      if p.dim() > 1:
-        nn.init.xavier_uniform_(p)
-
-  def create_padding_mask(self, seq, pad_idx=0):
-    """
-    Create a mask to hide padding tokens.
-    Args:
-      seq: Input sequence tensor with shape (batch_size, seq_length), contains words' ID.
-      # seq may seems like this: （batch_size=2, seq_length=5）
-      seq = torch.tensor([
-          [15, 23, 8, 0, 0],  # "How are" + two paddings
-          [42, 3, 0, 0, 0]    # "Hello" + three paddings
-          ])
-      pad_idx: Index of the padding token in the vocabulary (in this case the padding token is 0, check class SimpleTokenizer)
-    Returns:
-      Mask tensor where True values indicate valid positions.
-      tensor([[True, True, True, False, False],
-          [True, True, False, False, False]], dtype=torch.bool)
-    """
-    return (seq != pad_idx).unsqueeze(1).unsqueeze(2)
-    # -> (batch_size, 1, 1, seq_length), two dimensions with 1 so that it can be applied to attention score matrix with shape (batch_size, num_heads, seq_length, seq_length) through broadcasting
-
-  def create_look_ahead_mask(self, size):
-    """
-    Create a mask to prevent attending to future positions. triu -> triangular upper 上三角矩阵
-    关于torch.ones(size, size), 传入维度时不需要额外的括号或方括号，因为函数签名就是接受多个维度参数 torch.ones(2, 3, 4) -> 创建2×3×4张量;  torch.ones(3, 4) -> 创建3×4矩阵
-    Args:
-      size: Size of the square mask matrix
-      diagonal: Diagonal offset (default 0 means main diagonal, 1 means above the main diagonal -> exclude the main diagonal)
-
-      torch.triu(torch.ones(3,3), diagonal=0)
-      # 保留主对角线及其上方
-      => tensor([[1., 1., 1.],
-            [0., 1., 1.],
-            [0., 0., 1.]])
-
-      torch.triu(torch.ones(3,3), diagonal=1)
-      # 保留主对角线上方（不含主对角线）
-      => tensor([[0., 1., 1.],
-            [0., 0., 1.],
-            [0., 0., 0.]])
-
-    Returns:
-      Upper triangular mask matrix, elements in the matrix that are equal to 0 become True
-      tensor([[True, False, False],
-          [True, True, False],
-          [True, True, True]], dtype=torch.bool)
-    """
-    mask = torch.triu(torch.ones(size, size), diagonal=1).to(device)
-    return mask == 0
-
-  def forward(self, src, tgt):
-    """
-    Training Process
-    Args:
-      src: Source sequence tensor with shape (batch_size, src_seq_length)
-      tgt: Target sequence tensor with shape (batch_size, tgt_seq_length)
-      Both src and tgt are word ID tensors. Not original word tensors simply stripped from sequences. There is a transformation between words and word IDs.
-
-    Returns:
-      Output logits with shape (batch_size, tgt_seq_length, vocab_size)
-    """
-    # Create masks
-    src_mask = self.create_padding_mask(src) # src's shape: (batch_size, seq_length). Tensor src is not a embedding tensor, it's just a word ID tensor.
-    print(src_mask.shape())
-    tgt_mask = self.create_padding_mask(tgt) & self.create_look_ahead_mask(tgt.size(1))
-    print(tgt_mask.shape())
-
-    # Embed and encode source sequence
-    src_embedded = self.embedding(src) * math.sqrt(self.d_model) # Ensure that the gradient of the softmax function changes significantly.
-    print(src_embedded.shape()) # Here we should get a tensor with shape: (batch_size, sequence_length, d_model)
-    src_embedded = self.positional_encoding(src_embedded) # src_embedded will be proceed into Encoder Layers in the following step.
-
-    enc_output = src_embedded
-    for encoder_layer in self.encoder_layers:
-      enc_output = encoder_layer(enc_output, src_mask)
-
-    # Embed and decode target sequence
-    tgt_embedded = self.embedding(tgt) * math.sqrt(self.d_model)
-    print(tgt_embedded.shape())
-    tgt_embedded = self.positional_encoding(tgt_embedded)
-
-    dec_output = tgt_embedded
-    for decoder_layer in self.decoder_layers:
-      dec_output = decoder_layer(dec_output, enc_output, src_mask, tgt_mask)
-
-    # Project to vocabulary
-    output = self.output_projection(dec_output) # Logits tensor with shape (batch_size, tgt_seq_length, vocab_size)
-
-    return output
-
-  def generate(self, src, tokenizer, max_length=50, temperature=1.0):
-    """
-    Generate a response given a source sequence.
-
-    Args:
-      src: Source sequence tensor of shape (1, src_seq_length)
-      tokenizer: Tokenizer object for decoding
-      max_length: Maximum length of generated sequence
-      temperature: Sampling temperature (higher = more random)
-
-    Returns:
-      Generated text string.
-    """
-    self.eval() # Set the model to evaluation mode. Turn off Dropout (no longer randomly drop neurons), turn off BatchNorm updates (if any), and notify all submodules to enter evaluation mode
-    with torch.no_grad(): # torch.no_grad() 暂时关闭梯度计算
-      # Encoder source
-      src_mask = self.create_padding_mask(src)
-      src_embedded = self.embedding(src) * math.sqrt(self.d_model)
-      src_embedded = self.positional_encoding(src_embedded)
-      enc_output = src_embedded
-      for encoder_layer in self.encoder_layers: # Here we iterate four layers in that ModuleList object iterator
-        enc_output = encoder_layer(enc_output, src_mask)
-
-      # Start with SOS token, here the shape of tgt is (1,1) <- (batch_size=1, sequence_length=1)
-      tgt = torch.tensor([[tokenizer.word2idx['<SOS>']]]).to(device)
-
-      for _ in range(max_length):
-        # Create target mask
-        tgt_mask = self.create_look_ahead_mask(tgt.size(1))
-
-        # Decoder
-        tgt_embedded = self.embedding(tgt) * math.sqrt(self.d_model)
-        tgt_embedded = self.positional_encoding(tgt_embedded)
-        dec_output = tgt_embedded # dec_output shape: (batch_size, sequence_length, d_model)
-        for decoder_layer in self.decoder_layers:
-          dec_output = decoder_layer(dec_output, enc_output, src_mask, tgt_mask) # return tensor shape: (batch_size, seq_length, d_model)
-
-        # Get next token probabilities
+    def _init_weights(self):
         """
+        Initialize model weights using Xavier initialization.
+        Xavier初始化（也叫Glorot初始化）的数学原理是保持每层输入和输出的方差一致，防止梯度消失或爆炸。公式是从均匀分布U(-a, a)中采样，其中a = sqrt(6/(fan_in + fan_out))
+        nn.init.kaiming_normal_：适合ReLU激活函数
+        nn.init.normal_：标准正态分布
+        nn.init.constant_：常数初始化
+        nn.init.zeros_：全零初始化
+        """
+        for (
+            p
+        ) in (
+            self.parameters()
+        ):  # Returns an iterator over all trainable parameters in the model. This is typically passed to an optimizer.
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def create_padding_mask(self, seq, pad_idx=0):
+        """
+        Create a mask to hide padding tokens.
+        Args:
+          seq: Input sequence tensor with shape (batch_size, seq_length), contains words' ID.
+          # seq may seems like this: （batch_size=2, seq_length=5）
+          seq = torch.tensor([
+              [15, 23, 8, 0, 0],  # "How are" + two paddings
+              [42, 3, 0, 0, 0]    # "Hello" + three paddings
+              ])
+          pad_idx: Index of the padding token in the vocabulary (in this case the padding token is 0, check class SimpleTokenizer)
+        Returns:
+          Mask tensor where True values indicate valid positions.
+          tensor([[True, True, True, False, False],
+              [True, True, False, False, False]], dtype=torch.bool)
+        """
+        return (seq != pad_idx).unsqueeze(1).unsqueeze(2)
+        # -> (batch_size, 1, 1, seq_length), two dimensions with 1 so that it can be applied to attention score matrix with shape (batch_size, num_heads, seq_length, seq_length) through broadcasting
+
+    def create_look_ahead_mask(self, size):
+        """
+        Create a mask to prevent attending to future positions. triu -> triangular upper 上三角矩阵
+        关于torch.ones(size, size), 传入维度时不需要额外的括号或方括号，因为函数签名就是接受多个维度参数 torch.ones(2, 3, 4) -> 创建2×3×4张量;  torch.ones(3, 4) -> 创建3×4矩阵
+        Args:
+          size: Size of the square mask matrix
+          diagonal: Diagonal offset (default 0 means main diagonal, 1 means above the main diagonal -> exclude the main diagonal)
+
+          torch.triu(torch.ones(3,3), diagonal=0)
+          # 保留主对角线及其上方
+          => tensor([[1., 1., 1.],
+                [0., 1., 1.],
+                [0., 0., 1.]])
+
+          torch.triu(torch.ones(3,3), diagonal=1)
+          # 保留主对角线上方（不含主对角线）
+          => tensor([[0., 1., 1.],
+                [0., 0., 1.],
+                [0., 0., 0.]])
+
+        Returns:
+          Upper triangular mask matrix, elements in the matrix that are equal to 0 become True
+          tensor([[True, False, False],
+              [True, True, False],
+              [True, True, True]], dtype=torch.bool)
+        """
+        mask = torch.triu(torch.ones(size, size), diagonal=1).to(device)
+        return mask == 0
+
+    def forward(self, src, tgt):
+        """
+        Training Process
+        Args:
+          src: Source sequence tensor with shape (batch_size, src_seq_length)
+          tgt: Target sequence tensor with shape (batch_size, tgt_seq_length)
+          Both src and tgt are word ID tensors. Not original word tensors simply stripped from sequences. There is a transformation between words and word IDs.
+
+        Returns:
+          Output logits with shape (batch_size, tgt_seq_length, vocab_size)
+        """
+        # Create masks
+        src_mask = self.create_padding_mask(
+            src
+        )  # src's shape: (batch_size, src_seq_length). Tensor src is not an embedding tensor, it's just a word ID tensor.
+        print(src_mask.shape())
+        tgt_mask = self.create_padding_mask(tgt) & self.create_look_ahead_mask(
+            tgt.size(1)
+        )
+        print(tgt_mask.shape())
+
+        # Embed and encode source sequence
+        src_embedded = self.embedding(src) * math.sqrt(
+            self.d_model
+        )  # Ensure that the gradient of the softmax function changes significantly.
+        print(
+            src_embedded.shape()
+        )  # Here we should get a tensor with shape: (batch_size, src_sequence_length, d_model)
+        src_embedded = self.positional_encoding(
+            src_embedded
+        )  # src_embedded will be proceeded into Encoder Layers in the following step.
+
+        enc_output = src_embedded
+        for encoder_layer in self.encoder_layers:
+            enc_output = encoder_layer(
+                enc_output, src_mask
+            )  # enc_output has shape: (batch_size, src_seq_length, d_model)
+
+        # Embed and decode target sequence
+        tgt_embedded = self.embedding(tgt) * math.sqrt(self.d_model)
+        print(
+            tgt_embedded.shape()
+        )  # Here we should get a tensor with shape: (batch_size, tgt_sequence_length, d_model)
+        tgt_embedded = self.positional_encoding(tgt_embedded)
+
+        dec_output = tgt_embedded
+        for decoder_layer in self.decoder_layers:
+            dec_output = decoder_layer(
+                dec_output, enc_output, src_mask, tgt_mask
+            )  # dec_output has shape: (batch_size, tgt_seq_length, d_model)
+
+        # Project to vocabulary
+        # 直接把解码器最后一层的隐藏状态线性投射成维度为 (batch, tgt_len, vocab_size) 的 logits，并没有做任何归一化
+        # 在训练时，nn.CrossEntropyLoss 会在内部对这些 logits 做 log_softmax+负对数似然计算，所以你不需要也不应该在 forward 里进行归一化
+        output = self.output_projection(
+            dec_output
+        )  # Logits tensor with shape (batch_size, tgt_seq_length, vocab_size)
+
+        return output
+
+    def generate(self, src, tokenizer, max_length=50, temperature=1.0):
+        """
+        Generate a response given a source sequence.
+
+        Args:
+          src: Source sequence tensor of shape (1, src_seq_length)
+          tokenizer: Tokenizer object for decoding
+          max_length: Maximum length of generated sequence
+          temperature: Sampling temperature (higher = more random)
+
+        Returns:
+          Generated text string.
+        """
+        self.eval()  # Set the model to evaluation mode. Turn off Dropout (no longer randomly drop neurons), turn off BatchNorm updates (if any), and notify all submodules to enter evaluation mode
+        with torch.no_grad():  # torch.no_grad() 暂时关闭梯度计算
+            # Encoder source
+            src_mask = self.create_padding_mask(src)
+            src_embedded = self.embedding(src) * math.sqrt(self.d_model)
+            src_embedded = self.positional_encoding(src_embedded)
+            enc_output = src_embedded
+            for (
+                encoder_layer
+            ) in (
+                self.encoder_layers
+            ):  # Here we iterate four layers in that ModuleList object iterator
+                enc_output = encoder_layer(enc_output, src_mask)
+
+            # Start with SOS token, here the shape of tgt is (1,1) <- (batch_size=1, sequence_length=1)
+            tgt = torch.tensor([[tokenizer.word2idx["<SOS>"]]]).to(device)
+
+            for _ in range(max_length):
+                # Create target mask
+                tgt_mask = self.create_look_ahead_mask(tgt.size(1))
+
+                # Decoder
+                tgt_embedded = self.embedding(tgt) * math.sqrt(self.d_model)
+                tgt_embedded = self.positional_encoding(tgt_embedded)
+                dec_output = tgt_embedded  # dec_output shape: (batch_size, sequence_length, d_model)
+                for decoder_layer in self.decoder_layers:
+                    dec_output = decoder_layer(
+                        dec_output, enc_output, src_mask, tgt_mask
+                    )  # return tensor shape: (batch_size, seq_length, d_model)
+
+                # Get next token probabilities
+                """
         在词汇表维度上进行softmax计算，使用温度来选择让分布区分度更明显还是更模糊
         T < 1：放大差异，使分布更尖锐（更确定） Amplify differences, make distributions sharper (more certain)
         T > 1：缩小差异，使分布更平坦（更随机） Reduce variance, make the distribution flatter (more random)
         """
-        # Select last word's logits only, PyTorch will squeeze the middle dimension by default because we only select one index of that dimension, not a slice.
-        logits = self.output_projection(dec_output[:, -1, :]) # dec_output[:, -1, :] shape: (batch_size, d_model); logits has shape: (batch_size, vocab_size). But in this module batch_size=1 so the shape is (1, vocab_size)
-        # 每个样本一个分布，表示最后一个 token 预测的词概率。
-        probs = F.softmax(logits / temperature, dim=-1) # probs has shape: (batch_size, vocab_size) -> (1, vocab_size).
+                # Select last word's logits only, PyTorch will squeeze the middle dimension by default because we only select one index of that dimension, not a slice.
+                logits = self.output_projection(
+                    dec_output[:, -1, :]
+                )  # dec_output[:, -1, :] shape: (batch_size, d_model); logits has shape: (batch_size, vocab_size). But in this module batch_size=1 so the shape is (1, vocab_size)
+                # 每个样本一个分布，表示最后一个 token 预测的词概率。
+                probs = F.softmax(
+                    logits / temperature, dim=-1
+                )  # probs has shape: (batch_size, vocab_size) -> (1, vocab_size).
 
-        # Sample next token
-        """
+                # Sample next token
+                """
         torch.multinomial is a function in PyTorch used to sample integer indices from a given probability distribution.
           https://docs.pytorch.org/docs/stable/generated/torch.multinomial.html#torch-multinomial
         It is often used in language models to "extract words" according to probability distribution.
@@ -639,17 +790,391 @@ class TransformerChatbot(nn.Module):
         Return:
           Index of the selected elements.
         """
-        # 注意：multinomial并不是一定选取概率最高的那个，而是采样num_samples次，至于每个元素被采集到的概率按照probs中的概率来计算。这样可以让模型的预测保留一定的creativity和更多的不确定性.
-        next_token = torch.multinomial(probs, 1) # 这里采样获得的是词在vocabulary中对应的ID, shape: (batch_size, 1) -> (1, 1)
-        # 把两个张量 tgt 和 next_token 沿着 dim=1(也就是sequence_length) 这个维度进行 拼接（concatenate），也就是在序列长度方向上追加一个新生成的token， dim=0是batch维度
-        tgt = torch.cat([tgt, next_token], dim=1) # # (1, 1) + (1, 1) = (1, 2) 现在的 tgt = <SOS>的ID + 新词的ID
+                # 注意：multinomial并不是一定选取概率最高的那个，而是采样num_samples次，至于每个元素被采集到的概率按照probs中的概率来计算。这样可以让模型的预测保留一定的creativity和更多的不确定性.
+                next_token = torch.multinomial(
+                    probs, 1
+                )  # 这里采样获得的是词在vocabulary中对应的ID, shape: (batch_size, 1) -> (1, 1)
+                # 把两个张量 tgt 和 next_token 沿着 dim=1(也就是sequence_length) 这个维度进行 拼接（concatenate），也就是在序列长度方向上追加一个新生成的token， dim=0是batch维度
+                tgt = torch.cat(
+                    [tgt, next_token], dim=1
+                )  # # (1, 1) + (1, 1) = (1, 2) 现在的 tgt = <SOS>的ID + 新词的ID
 
-        # Stop if EOS token is generated
-        # .item()方法将只包含一个元素的张量转换为Python的标准数据类型（int、float等），这里就是把这个张量tensor([[ID]])转换成标量ID
-        if next_token.item() == tokenizer.word2idx['<EOS>']:
-          break
+                # Stop if EOS token is generated
+                # .item()方法将只包含一个元素的张量转换为Python的标准数据类型（int、float等），这里就是把这个张量tensor([[ID]])转换成标量ID
+                if next_token.item() == tokenizer.word2idx["<EOS>"]:
+                    break
 
-      # Decode to text
-      # tgt[0]提取第一个（也是唯一的）批次的数据, tgt的形状是[1, seq_length], tgt[0]的形状是[seq_length]
-      # tokenizer.decode将token ID序列转换回文本字符串，这就是最终的回复
-      return tokenizer.decode(tgt[0])
+            # Decode to text
+            # tgt[0]提取第一个（也是唯一的）批次的数据, tgt的形状是[1, seq_length], tgt[0]的形状是[seq_length]
+            # tokenizer.decode将token ID序列转换回文本字符串，这就是最终的回复
+            return tokenizer.decode(tgt[0])
+
+# ============== Datast Class ==============
+
+class ChatDataset(Dataset):
+    """
+    Custom dataset class for chat data.
+    Expects data in the format of (input, response) pairs.
+    在初始化时接收一个列表 data，其中每个元素是一个 (input_text, response_text) 的二元组。
+    """
+
+    def __init__(self, data, tokenizer, max_length=128):
+        self.data = data
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    # 以双下划线开头和结尾的方法，称为“魔法方法”（magic methods）或“特殊方法”
+    """
+        它们并不直接被你调用，而是被 Python 解释器在特定场景下自动调用：
+            len(obj) 会触发 obj.__len__()
+            obj[idx] 会触发 obj.__getitem__(idx)
+        这种设计让类能“表现得像”内置类型（列表、字典等），从而与 Python 生态中其它工具（例如 PyTorch 的 DataLoader）无缝配合。
+        当你写 dataset[10]，Python 会在后台调用 dataset.__getitem__(10)。
+    """
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):  # 0 <= idx < len(self.data)
+        """
+        Returns:
+          src: Source sequence (input)
+          tgt_input: Target input sequence (response with SOS)
+          tgt_output: Target output sequence (response with EOS)
+        """
+        input_text, response_text = self.data[idx]
+
+        # 1. src sequence 源序列：不加<SOS>，但要加<EOS>
+        src = self.tokenizer.encode(
+            input_text, max_length=self.max_length, add_sos=False, add_eos=True
+        )
+
+        # 2. tgt_input sequence 解码器输入：加<SOS>，但不加<EOS>
+        tgt_input = self.tokenizer.encode(
+            response_text, max_length=self.max_length, add_sos=True, add_eos=False
+        )
+
+        # 3. tgt_output sequence 解码器目标：不加<SOS>，但加<EOS>
+        tgt_output = self.tokenizer.encode(
+            response_text, max_length=self.max_length, add_sos=False, add_eos=True
+        )
+
+        # Pad sequences to max_length 保证 src, tgt_input, tgt_output 三者长度都 == self.max_length 功能冗余，暂时注释掉
+        # src = src[:self.max_length] + [0] * max(0, self.max_length - len(src))
+        # tgt_input = tgt_input[:self.max_length] + [0] * max(0, self.max_length - len(tgt_input))
+        # tgt_output = tgt_output[:self.max_length] + [0] * max(0, self.max_length - len(tgt_output))
+
+        # 调用__getitem__时（其实就是触发索引时），会按照实现把 src_ids, tgt_input_ids, tgt_output_ids 打包成一个元组返回
+        return (  # torch.long等同于torch.int64，整型张量，长度都为max_length
+            torch.tensor(
+                src, dtype=torch.long
+            ),  # shape: (max_length,) All of these tensors are converted from word ID list. These are word ID tensor
+            torch.tensor(tgt_input, dtype=torch.long),  # shape: (max_length,)
+            torch.tensor(tgt_output, dtype=torch.long),  # shape: (max_length,)
+        )
+
+# ============== Training Functions ==============
+
+def train_epoch(model, dataloader, optimizer, criterion, device):
+    """
+    Train the model for one epoch.
+    切到训练模式 → 遍历数据 → 清梯度 → 前向 → 计算损失 → 反向 → 裁剪梯度 → 更新参数 → 打印进度 → 最后给出平均损失
+    Args:
+      model: The model to train.
+      dataloader: The data loader for the training data.
+      optimizer: The optimizer to use for training.
+      criterion: The loss function to use.
+      device: The device to use for training.
+    Returns:
+      The average loss for the epoch.
+    """
+    model.train()  # Switch the model to "training mode" so that the parameters can be updated
+    total_loss = 0
+
+    progress_bar = tqdm(
+        dataloader, desc="Training"
+    )  # Provide progress indicators, desc means description of this progress bar; dataloader can be any iterable object (here PyTorch’s DataLoader)
+    # batch's shape is (src_batch_cpu, tgt_input_batch_cpu, tgt_output_batch_cpu)
+    # After [x.to(device) for x in batch], batch is moved to GPU and turned into [src_batch_gpu, tgt_input_batch_gpu, tgt_output_batch_gpu]
+    # In this case, the batch's shape is ((BATCH_SIZE, MAX_LENGTH),(BATCH_SIZE, MAX_LENGTH),(BATCH_SIZE, MAX_LENGTH)) -> ((32,64),(32,64),(32,64)). This is defined in main() function.
+    # src, tgt_input, tgt_output = [src_batch_gpu, tgt_input_batch_gpu, tgt_output_batch_gpu], the list will be unpacked and assigned respectively to three variables.
+    for batch in progress_bar:
+        src, tgt_input, tgt_output = [x.to(device) for x in batch]
+
+        # Zero gradients
+        optimizer.zero_grad()
+
+        # Forward pass
+        output = model(src, tgt_input)
+
+        # Reshape for loss calculation
+        """
+            The original shape of output is (batch_size, seq_len, vocab_size)
+            CrossEntropyLoss requires the input to be (N, C) and the target to be a one-dimensional label of length N.
+            (batch_size, seq_len, vocab_size) -> (batch_size * seq_len, vocab_size)
+            N = batch_size * seq_len, C = vocab_size
+        """
+        output = output.reshape(-1, output.size(-1))
+        tgt_output = tgt_output.reshape(-1)
+
+        # Calculate loss (ignore padding tokens)
+        loss = criterion(output, tgt_output)
+
+        # Backward pass
+        # 它根据当前计算图，从标量 loss 向上反向传播，自动计算并在每个可训练参数的 .grad 属性里积累梯度。它本身不返回任何值；只是为后续的 optimizer.step() 准备好梯度。
+        loss.backward()
+
+        # Clip gradients to prevent exploding gradients 保证梯度的全局 L2 范数不超过 1.0
+        torch.nn.utils.clips_grad_norm_(model.parameters(), 1.0)
+
+        # Update weights
+        """
+            在梯度已经通过 loss.backward() 计算并保存在各参数的 .grad 中后，optimizer.step() 会：
+            读取各参数的 .grad；
+            按照优化算法（这里是 Adam）的规则更新参数值；
+            清理/累积必要的内部状态（如动量）。
+        """
+        optimizer.step()
+
+        # Update progress bar
+        total_loss += (
+            loss.item()
+        )  # loss.item()：把只有一个元素的张量 loss 转成 Python 浮点数，同时把每个 batch 的损失求和，用于后面计算平均损失
+        progress_bar.set_postfix(
+            {"loss": loss.item()}
+        )  # 给 tqdm 进度条实时添加一个后缀字段 “loss=…” ，这样在控制台能看到当前 batch 的损失数值。
+
+    return total_loss / len(dataloader)  # 返回平均每个 batch 的损失
+
+def evaluate(model, dataloader, criterion, device):
+    """
+    Evaluate the model on the validation data.
+    Args:
+      model: The model to evaluate.
+      dataloader: The data loader for the validation data.
+      criterion: The loss function to use.
+      device: The device to use for evaluation.
+    Returns:
+      The average validation loss.
+    """
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating"):
+            src, tgt_input, tgt_output = [x.to(device) for x in batch]
+
+            # Forward pass
+            output = model(src, tgt_input)
+
+            # Reshape for loss calculation
+            output = output.reshape(-1, output.size(-1))
+            tgt_output = tgt_output.reshape(-1)
+
+            # Calculate loss
+            loss = criterion(output, tgt_output)
+            total_loss += loss.item()
+
+        return total_loss / len(dataloader)
+
+# ============ Data Loading and Preprocessing ============
+
+def load_real_data(split_ratio=0.9, max_pairs=None):
+    """
+        Load and preprocess the Cynaptics/persona-chat dataset into context-response pairs.
+        Returns train_data and val_data lists of (context, reply) tuples.
+        https://huggingface.co/datasets/Cynaptics/persona-chat
+    """
+    raw = load_dataset("Cynaptics/persona-chat", split="train")
+    pairs = []
+    for item in raw:
+        # 先把 persona_b 里的人设信息合成一段文本
+        persona = " ".join(item["persona_b"])
+        # 再按示例把 dialogue 转成带 <USER>/<BOT> 的 history. Here because the dataset's dialogue contains "Persona A" and "Persona B", so we need to transfer them into special tokens.
+        history = []
+        for turn in item["dialogue"]:
+            speaker, utter = turn.split(":", 1)
+            tag = "<USER>" if speaker.endswith("A") else "<BOT>"
+            history.append(f"{tag} {utter.strip()}")
+        history = " ".join(history)
+        # 最终把两者拼成模型的输入
+        context = persona + " " + history
+        reply = item["reference"]  # context for encoder, reply for decoder
+        pairs.append(
+            (context, reply)
+        )  # (context, reply) is one pair, we have 20000 tuples in this "pairs" list
+
+    random.shuffle(pairs)
+    if max_pairs:
+        pairs = pairs[:max_pairs]
+    split_idx = int(split_ratio * len(pairs))
+
+    return (
+        pairs[:split_idx],
+        pairs[split_idx:],
+    )  # Return train dataset and validation dataset, both datasets are tuple list.
+
+# ============== Main Training Script ==============
+
+def main():
+    """
+        Train the transformer chatbot using real persona-chat data.
+    """
+    # Hyperparameters
+    BATCH_SIZE = 8
+    LEARNING_RATE = 0.001
+    NUM_EPOCHS = 10
+    MAX_LENGTH = 64
+    D_MODEL = 512
+    N_HEADS = 8
+    N_LAYERS = 4
+    D_FF = 2048
+    DROPOUT = 0.1
+
+    print("Preparing data...")
+    # pairs[:split_idx] -> train_data, pairs[split_idx:] -> val_data. All the elements within the "pairs" are (context, reply), maps to (input_text, response_text)
+    train_data, val_data = load_real_data(split_ratio=0.9, max_pairs=20000)
+
+    tokenizer = SimpleTokenizer(level="word")
+    all_texts = []
+    for pair in train_data + val_data:
+        for text in pair:
+            all_texts.append(text)
+    tokenizer.build_vocab(all_texts, max_vocab_size=5000)
+
+    train_dataset = ChatDataset(
+        train_data, tokenizer, MAX_LENGTH
+    )  # When you called train_dataset[idx], return a tuple contains three tensors (each of them has the shape : (max_length,), 1-D tensor)
+    val_dataset = ChatDataset(val_data, tokenizer, MAX_LENGTH)
+
+    train_loader = DataLoader(  # 每个 epoch 开始，shuffle=True 会在内部随机排列所有索引，然后每次从排列好的索引里，切出 32 个给 BatchSampler.
+        train_dataset,          # DataLoaderIter 把这32（BATCH_SIZE）个索引发给4（num_workers）个工作进程并行调用 __getitem__，得到32份 (src, tgt_in, tgt_out)
+        batch_size=BATCH_SIZE,  # 最后 collate_fn 分别把 32 份src, tgt_in, tgt_out张量（这里已经被解包）堆叠成 (BATCH_SIZE, MAX_LENGTH) -> (32, 64) 的大张量，然后再组成新的包含三个二维张量的元组，返回给你的训练代码。
+        shuffle=True,           # 注意， 上述过程只在for batch in train_loader: 时才会进行，这里只是创建了一个DataLoader的可迭代的变量。
+        num_workers=4,          # 这里的 train_dataset（ChatDataset实例）会被存到 loader.dataset 里，类型和内容都没变。
+        pin_memory=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+    )
+
+    print("Initializing model...")
+    model = TransformerChatbot(
+        vocab_size=tokenizer.vocab_size,
+        d_model=D_MODEL,
+        num_heads=N_HEADS,
+        num_layers=N_LAYERS,
+        d_ff=D_FF,
+        max_seq_length=MAX_LENGTH,
+        dropout_rate=DROPOUT,
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=0.1, ignore_index=tokenizer.word2idx["<PAD>"]
+    )
+
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
+
+    print("Starting training...")
+    best_val_loss = float("inf")
+    for epoch in range(NUM_EPOCHS):
+        print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss = evaluate(model, val_loader, criterion, device)
+        scheduler.step(val_loss)
+        print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "tokenizer": tokenizer,
+                    "hyperparameters": {
+                        "d_model": D_MODEL,
+                        "num_heads": N_HEADS,
+                        "num_layers": N_LAYERS,
+                        "d_ff": D_FF,
+                        "max_length": MAX_LENGTH,
+                        "vocab_size": tokenizer.vocab_size,
+                        "dropout_rate": DROPOUT,
+                    },
+                },
+                "best_chatbot_model.pth",
+            )
+            print("Saved best model!")
+
+        if (epoch + 1) % 2 == 0:
+            print("\nTesting model responses:")
+            examples = ["Hello", "How are you?", "What's your name?"]
+            model.eval()
+            for inp in examples:
+                tokens = tokenizer.encode(
+                    inp, max_length=MAX_LENGTH, add_sos=False, add_eos=True
+                )
+                input_tensor = torch.tensor([tokens]).to(device)
+                response = model.generate(input_tensor, tokenizer, max_length=30)
+                print(f"Input: {inp}")
+                print(f"Response: {response}\n")
+
+    print("Training completed!")
+
+# ============== Inference Functinos ==============
+
+def load_model(model_path):
+    """
+        Load a trained model checkpoint for inference.
+    """
+    checkpoint = torch.load(model_path, map_location=device)
+    hp = checkpoint["hyperparameters"]
+    model = TransformerChatbot(
+        vocab_size=hp["vocab_size"],
+        d_model=hp["d_model"],
+        num_heads=hp["num_heads"],
+        num_layers=hp["num_layers"],
+        d_ff=hp["d_ff"],
+        max_seq_length=hp["max_length"],
+        dropout_rate=hp["dropout_rate"],
+    ).to(device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    tokenizer = checkpoint["tokenizer"]
+    return model, tokenizer
+
+def chat_with_bot(model, tokenizer, max_length=64):
+    """
+        Interactive chat loop for a trained TransformerChatbot.
+    """
+    print("Chatbot is ready! Type 'quit' to exit.")
+    print("-" * 50)
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() in ["quit", "exit", "bye"]:
+            print("Chatbot: Goodbye!")
+            break
+        tokens = tokenizer.encode(
+            user_input, max_length=max_length, add_sos=False, add_eos=True
+        )
+        input_tensor = torch.tensor([tokens]).to(device)
+        with torch.no_grad():
+            response = model.generate(
+                input_tensor, tokenizer, max_length=50, temperature=0.8
+            )
+
+        print(f"Chatbot: {response}\n")
+
+
+if __name__ == "__main__":
+    # Run the training
+    main()
+
+    # After training, you can load and chat with the model:
+    # model, tokenizer = load_model('best_chatbot_model.pth')
+    # chat_with_bot(model, tokenizer)
