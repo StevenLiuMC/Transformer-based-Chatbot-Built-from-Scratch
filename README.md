@@ -245,6 +245,170 @@ class TransformerChatbot(nn.Module)
 -  Training and inference support  
 -  Clean, modular, research-friendly design
 
+---
+
+# 2025_06_25 Update (Full Chatbot Pipeline with Real Dataset & Training Utilities)
+
+This update implements a complete end-to-end **Transformer-based chatbot pipeline**, from dataset preparation to model training and inference. Designed in **PyTorch** with clear modular structure and real dialogue data from Hugging Face.
+
+---
+
+## 📌 Update Summary
+
+- **Date:** 2025-06-25  
+- **New Components:**
+  - `ChatDataset`: Custom Dataset class  
+  - `train_epoch()` & `evaluate()`: Training loop helpers  
+  - `load_real_data()`: Preprocessing HuggingFace persona-chat  
+  - `main()`: Full training script with validation & saving  
+  - `load_model()` & `chat_with_bot()`: Inference functions
+- **Components Changed:**
+  - `encode` method under `SimpleTokenizer`
+
+---
+
+## 🧩 Modules Overview
+
+### 1. Updated `encode` method under `SimpleTokenizer`
+
+> Here’s how the previous encode method is implemented:
+
+```python
+    def encode(self, text, max_length = None):
+      
+      tokens = self._tokenize(text)
+      indices = [self.word2idx.get(token, self.word2idx['<UNK>']) for token in tokens]
+
+      if max_length:
+        # Truncate and remain one spot for EOS
+        if len(indices) >= max_length - 1:
+          indices = indices[:max_length-1]
+
+        # If sequence is not long enough, add EOS first to tell the model that the useful information has ended and then add PAD to make the indices dimension unified.
+        indices.append(self.word2idx['<EOS>'])
+
+        if len(indices) < max_length:
+          indices += [self.word2idx['<PAD>']] * (max_length - len(indices))
+        else:
+        # If there's no limitation on length, simply add EOS
+          indices.append(self.word2idx['<EOS>'])
+
+      return indices
+```
+ - However, when I actually used the encode method, I found that as soon as the input text is shorter than max_length and requires <PAD> tokens, the position of <EOS> in the word-ID sequence becomes unpredictable. This creates a lot of headaches in ChatDataset—for example, tgt_input must not include <EOS> while tgt_output must. If the <EOS> token’s location is uncertain, later edits become unnecessarily complicated. To solve this, I modified the encode method in SimpleTokenizer so that it can be instructed whether to include <SOS> or <EOS> when encoding, and I provided sensible default arguments so that calls to encode without explicit <SOS>/<EOS> flags remain fully backward-compatible.
+
+> The latest version of the encode method is implemented as follows:
+
+```python
+    def encode(
+        self,
+        text: str,
+        max_length: int = None,
+        add_sos: bool = False,
+        add_eos: bool = True,
+    ) -> list[int]:
+       
+        tokens = self._tokenize(text)
+        indices = [self.word2idx.get(token, self.word2idx["<UNK>"]) for token in tokens]
+
+        # Spots reserved for <SOS> and <EOS>
+        reserve = int(add_sos) + int(add_eos)
+
+        # Make sure token ≤ max_length - reserve
+        if max_length and len(indices) > max_length - reserve:
+            indices = indices[: max_length - reserve]
+
+        # Insert SOS
+        if add_sos:
+            indices = [self.word2idx["<SOS>"]] + indices  # Add SOS
+
+        # Insert EOS
+        if add_eos:
+            indices.append(self.word2idx["<EOS>"])  # Add EOS
+
+        # PAD 到固定长度 Pad to max_length
+        if max_length and len(indices) < max_length:
+            pad_id = self.word2idx["<PAD>"]
+            indices += [pad_id] * (max_length - len(indices))
+
+        return indices  # Return the index list contains word ID
+```
+
+---
+
+### 2. `ChatDataset`
+
+> Purpose of This Class
+> - Convert raw (context, response) text pairs into three ID tensors for the model:
+>   - src: input sequence (no <SOS>, with <EOS>) 
+>   - tgt_input: decoder input (with <SOS>, no <EOS>)
+>   - tgt_output: decoder target (no <SOS>, with <EOS>)
+> How It’s Implemented?
+> - __init__ stores the data list, tokenizer, and max_length
+> - __len__ returns the total number of examples
+> - __getitem__ retrieves the text pair at index idx, calls tokenizer.encode(...) three times (with appropriate add_sos/add_eos flags), and wraps each ID list in a torch.long tensor
+
+---
+
+### 3. `train_epoch() & evaluate()`
+
+> Purpose of This Part:
+> - train_epoch(): Run one full training pass and return the average loss.
+> - evaluate(): Compute validation loss without updating model weights.
+> How They’re Implemented?
+> - Both accept (model, dataloader, criterion, device)
+> - train_epoch():
+>   - Set model.train()
+>   - Loop over batches: zero grads → forward → reshape outputs & targets → compute loss → backpropagate → clip gradients → optimizer step → accumulate loss
+> - evaluate():
+>   -  Set model.eval() + torch.no_grad()
+>   -  Loop over batches: forward → reshape → compute loss → accumulate
+>   -  Return average loss
+
+---
+
+### 4. `load_real_data()`
+
+> Purpose of This Part:
+> - Download and preprocess the “persona-chat” dataset into flat (context, reply) lists, then split into train/validation sets.
+> How They’re Implemented?
+> - Use load_dataset("Cynaptics/persona-chat", split="train").
+> - Merge all persona_b lines into a single character description.
+> - Tag each dialogue turn as <USER> (Persona A) or <BOT> (Persona B) and join into conversation history.
+> - Combine persona + history → context; take reference → reply.
+> - Shuffle, optionally trim to max_pairs, and split by split_ratio.
+
+---
+
+### 5. `main()`
+
+> What Happened within This Part:
+> - Orchestrate the entire training pipeline: data loading, tokenizer & loader setup, model/optimizer/loss configuration, epoch loops, and checkpoint saving.
+> How They’re Implemented?
+> - Define hyperparameters (batch size, LR, epochs, model dims).
+> - Call load_real_data() for train/val pairs.
+> - Build vocabulary with SimpleTokenizer.
+> - Wrap each split in ChatDataset + DataLoader.
+> - Instantiate TransformerChatbot, CrossEntropyLoss (with label smoothing and pad masking), Adam optimizer, and LR scheduler.
+> - For each epoch: run train_epoch(), then evaluate(), step the scheduler, and save the model if validation loss improves.
+
+---
+
+### 6. `load_model() & chat_with_bot()`
+
+> Functions Completed:
+> - load_model(): Restore model weights, tokenizer, and hyperparameters from a saved checkpoint.
+> - chat_with_bot(): Launch an interactive command-line loop for user–model conversation.
+> How They’re Implemented?
+> - load_model():
+>   - Load .pth file with torch.load()
+>   - Extract hyperparameters, build a new TransformerChatbot instance, and load state_dict
+>   - Return the model (in eval() mode) and the tokenizer
+> - chat_with_bot():
+>   - Prompt the user in a loop until they type “quit”.
+>   - Encode user text (<EOS> appended), call model.generate() for autoregressive decoding, and print the decoded response.
+
+---
 
 ## 📚 References
 
