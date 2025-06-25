@@ -1,5 +1,7 @@
 # Transformer-based Chatbot
 
+ - The original intent of this project was, based on my understanding of the “Attention Is All You Need” paper, to implement an encoder–decoder–based chatbot. Each module is built from scratch —— tailored to the model’s architecture and the specifics of the dataset —— so that I can deepen and systematize my grasp of the Transformer’s mathematical principles and data flow through every component. By completing this project, I gained a solid and comprehensive understanding of how the Transformer works, rather than simply relying on high-level calls like torch.nn.Transformer or other built-in Transformer layers.
+
 ---
 
 # 2025_06_25 Update (Full Chatbot Pipeline with Real Dataset & Training Utilities)
