@@ -19,10 +19,6 @@ import math
 import random
 from datasets import load_dataset
 
-# Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
 # Set ramdom seed. Ensure reproducibility across Python, NumPy and PyTorch
 seed = 42
 random.seed(seed)
@@ -317,7 +313,6 @@ class MultiHeadAttention(nn.Module):
 
         # 3.Apply mask if provided(for padding and future positions)
         if mask is not None:
-            mask = mask.unsqueeze(1).unsqueeze(1)  # Add head and query dimensions
             scores.masked_fill_(mask == 0, -1e9)
             """
       # If we have mask（True means we need to keep the original value）. Here is just a example of showing how mask works. Don't reflect the mechanism of masked self-attention.
@@ -673,19 +668,19 @@ class TransformerChatbot(nn.Module):
         src_mask = self.create_padding_mask(
             src
         )  # src's shape: (batch_size, src_seq_length). Tensor src is not an embedding tensor, it's just a word ID tensor.
-        print(src_mask.shape())
+        # print(src_mask.shape)
         tgt_mask = self.create_padding_mask(tgt) & self.create_look_ahead_mask(
             tgt.size(1)
         )
-        print(tgt_mask.shape())
+        # print(tgt_mask.shape)
 
         # Embed and encode source sequence
         src_embedded = self.embedding(src) * math.sqrt(
             self.d_model
         )  # Ensure that the gradient of the softmax function changes significantly.
-        print(
-            src_embedded.shape()
-        )  # Here we should get a tensor with shape: (batch_size, src_sequence_length, d_model)
+        # print(
+        #     src_embedded.shape
+        # )  # Here we should get a tensor with shape: (batch_size, src_sequence_length, d_model)
         src_embedded = self.positional_encoding(
             src_embedded
         )  # src_embedded will be proceeded into Encoder Layers in the following step.
@@ -698,9 +693,9 @@ class TransformerChatbot(nn.Module):
 
         # Embed and decode target sequence
         tgt_embedded = self.embedding(tgt) * math.sqrt(self.d_model)
-        print(
-            tgt_embedded.shape()
-        )  # Here we should get a tensor with shape: (batch_size, tgt_sequence_length, d_model)
+        # print(
+        #     tgt_embedded.shape
+        # )  # Here we should get a tensor with shape: (batch_size, tgt_sequence_length, d_model)
         tgt_embedded = self.positional_encoding(tgt_embedded)
 
         dec_output = tgt_embedded
@@ -925,7 +920,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         loss.backward()
 
         # Clip gradients to prevent exploding gradients 保证梯度的全局 L2 范数不超过 1.0
-        torch.nn.utils.clips_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         # Update weights
         """
@@ -1172,6 +1167,8 @@ def chat_with_bot(model, tokenizer, max_length=64):
 
 
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     # Run the training
     main()
 
